@@ -1,0 +1,86 @@
+# macOS / editor noise
+.DS_Store
+._*
+*.swp
+*.swo
+*~
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local config
+.venv/
+venv/
+.env
+.env.*
+
+# uv / packaging
+.uv-cache/
+build/
+dist/
+*.egg-info/
+
+# Keep the uv lockfile for reproducible CI
+!uv.lock
+
+# Data, generated outputs, and trained artifacts
+data/
+results/
+models/
+runs/
+*.pkl
+*.joblib
+*.pt
+*.pth
+
+# Raw images and rendered figures
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Local assistant context and planning
+AGENTS.md
+CLAUDE.md
+.agents/
+.claude/
+.codex/
+/specs/
+
+# Private reports and exports
+REPORT*.md
+DEFENSE_NOTES.md
+MC_DROPOUT_EXTENSION.md
+reports/
+outputs/
+*.pdf
+*.pptx
+*.docx
+*.zip
+*.tar.gz
+*.npy
+*.npz
+*.parquet
+*.csv
+*.tsv
+*.h5
+*.hdf5
+*.onnx
+*.safetensors
+
+# Local credentials and editor state
+*.pem
+*.key
+.idea/
+.vscode/
