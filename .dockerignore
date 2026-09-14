@@ -1,0 +1,14 @@
+# Allow only application source and reproducibility inputs into the build.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!.python-version
+!README.md
+!src/
+!src/*.py
+!train_pipeline.py
+!train_deep_pipeline.py
+!summarize_results.py
+!plot_mc_dropout_uncertainty.py
