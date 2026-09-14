@@ -127,6 +127,27 @@ class SharedManifestSmokeTests(unittest.TestCase):
             ):
                 train_deep_pipeline.main()
             deep_results = deep_root / "deep-fixture"
+            training = json.loads(
+                (deep_results / "results" / "deep_training_metadata.json").read_text()
+            )
+            checkpoint_path = deep_results / training["checkpoint"]["path"]
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=True
+            )
+            self.assertEqual(
+                training["checkpoint"]["sha256"], run_contract.sha256(checkpoint_path)
+            )
+            self.assertEqual(training["randomness"]["seed"], 73)
+            self.assertEqual(training["device"], "cpu")
+            self.assertEqual(training["loss"]["strategy"], "unweighted")
+            self.assertIsNone(training["loss"]["pos_weight"])
+            self.assertIsNone(training["weights"]["enum"])
+            self.assertEqual(checkpoint["seed"], training["randomness"]["seed"])
+            self.assertEqual(checkpoint["epoch"], training["selection"]["epoch"])
+            self.assertEqual(
+                checkpoint["selection_auc"], training["selection"]["score"]
+            )
+            self.assertEqual(checkpoint["split_hash"], manifest["split_hash"])
             for location, filename in (
                 (classical, "predictions_development.csv"),
                 (deep_results, "small_cnn_predictions_development.csv"),
@@ -184,6 +205,21 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         delta=1e-6,
                     )
                 if run == deep_results:
+                    self.assertIn(
+                        "results/deep_training_metadata.json", record["artifacts"]
+                    )
+                    self.assertEqual(
+                        record["artifacts"][training["checkpoint"]["path"]],
+                        training["checkpoint"]["sha256"],
+                    )
+                    selected = next(
+                        row
+                        for row in reported["training"]["history"]
+                        if row["epoch"] == training["selection"]["epoch"]
+                    )
+                    self.assertEqual(
+                        selected["selection_auc"], training["selection"]["score"]
+                    )
                     for metric, value in recomputed["mc_dropout_uncertainty"].items():
                         self.assertAlmostEqual(
                             value, reported["mc_dropout_uncertainty"][metric]

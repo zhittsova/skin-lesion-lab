@@ -27,6 +27,13 @@ The classical command uses `classical_prevalence`, `classical_logistic` or
 prediction roles and metrics summary. A failed GMM fit records whether
 the setting was invalid or the optimizer did not converge.
 
+Deep runs also write `results/deep_training_metadata.json`. It records the
+resolved training mode, pretrained weight identifier, transforms, randomness and
+device policy, loss weighting, and checkpoint selection. Its checkpoint reference
+includes a SHA-256 digest. The run's artifact map hashes both this metadata and
+the checkpoint. See [deep training](deep-training.md) for the mode and selection
+rules.
+
 `predictions.csv` is the common row contract. It has exactly these columns:
 `schema_version`, `run_id`, `model_key`, `role`, `split_hash`, `image_id`,
 `lesion_id`, `group_id`, `target`, `prob_melanoma`, and `prediction`. The group ID

@@ -73,9 +73,12 @@ runtime, status, and artifact checksums. Replaying a run requires the recorded
 source commit and any saved diff, matching metadata and image contents, the lockfile,
 the saved split manifest, and the same configuration and seed. The validator rejects
 changed or missing artifacts. [The run contract](docs/run-contract.md) describes
-the fields and validation rules. Pretrained EfficientNet weights require
-an explicit `--pretrained` option and download access. Use
-`--fine-tune-backbone` when training EfficientNet from scratch.
+the fields and validation rules. The [deep training guide](docs/deep-training.md)
+describes head training, full fine-tuning, loss weighting and checkpoint selection.
+Pretrained EfficientNet uses `EfficientNet_B0_Weights.IMAGENET1K_V1` and requires
+an explicit `--pretrained` option. An uncached weight file needs download access.
+Use `--fine-tune-backbone` when training EfficientNet from scratch; a random
+frozen backbone is rejected.
 Each pipeline writes `cohort_attrition.json` inside its run directory. For
 valid metadata, it records a reason for every row. Rows with unknown diagnoses,
 excluded cancers, or missing or corrupt images cannot enter the binary cohort.
@@ -114,7 +117,8 @@ roles from legacy `val` and `test` artifacts. Classical calibration is reserved
 for later implementation. Deep checkpoint selection and threshold selection use
 separate roles. Both CLIs reject confirmation-purpose manifests.
 
-CNN training uses class weights, so its outputs need calibration before a
+Deep training defaults to unweighted loss. Use `--loss-strategy pos_weight` for
+the training-count-weighted ablation. Weighted outputs need calibration before a
 probability-based cost threshold can be interpreted as an optimal decision rule.
 The 10:1 cost ratio is illustrative. Further evaluation should report variation
 across seeds and grouped resamples, followed by testing on an untouched external
