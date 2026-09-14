@@ -113,9 +113,9 @@ The manifest checks all metadata cells and eligible image bytes on each fresh
 preparation. Rerunning the freeze command validates an existing manifest; it does
 not replace it. Changed data requires an explicit new protocol and manifest.
 Output names use `selection`, `calibration` and `development` to distinguish these
-roles from legacy `val` and `test` artifacts. Classical calibration is reserved
-for later implementation. Deep checkpoint selection and threshold selection use
-separate roles. Both CLIs reject confirmation-purpose manifests.
+roles from legacy `val` and `test` artifacts. Both pipelines fit calibration and
+thresholds after model selection, then reuse saved policies for development
+evaluation. Both CLIs reject confirmation-purpose manifests.
 
 Deep training defaults to unweighted loss. Use `--loss-strategy pos_weight` for
 the training-count-weighted ablation. Weighted outputs need calibration before a
@@ -126,3 +126,7 @@ cohort.
 
 Planned Jupyter notebooks will explain the experiments and their results.
 Dependabot updates Python dependencies, Actions, and container images.
+
+Probability calibration and saved referral rules are described in
+[calibration](docs/calibration.md). Run reports distinguish raw scores, weighting
+correction and fitted probabilities, with proper scores and referral counts.

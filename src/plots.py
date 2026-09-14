@@ -230,7 +230,17 @@ def plot_calibration_curve(
     )
 
     ax.set_xlabel("Mean Predicted Probability")
-    ax.set_ylabel("Empirical Frequency (True Positive Rate)")
+    ax.set_ylabel("Observed positive fraction")
+    for probability, frequency, count in zip(
+        mean_probs_valid, frequencies_valid, bin_sizes_valid
+    ):
+        ax.annotate(
+            f"n={int(count)}",
+            (probability, frequency),
+            xytext=(4, -12 if frequency > 0.9 else 4),
+            textcoords="offset points",
+            fontsize=8,
+        )
     ax.set_title(title)
     ax.set_xlim([0, 1])
     ax.set_ylim([0, 1])

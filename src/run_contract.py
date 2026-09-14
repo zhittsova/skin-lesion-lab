@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src import evaluation, splitting, uncertainty
+from src import calibration, evaluation, splitting, uncertainty
 
 SCHEMA_VERSION = 1
 PREDICTION_COLUMNS = (
@@ -36,6 +36,10 @@ PREDICTION_COLUMNS = (
     "prob_melanoma",
     "prediction",
 )
+
+
+def _read_csv(path):
+    return pd.read_csv(path, float_precision="round_trip")
 
 
 def sha256(path: Path) -> str:
@@ -240,10 +244,28 @@ def _check_deep_arrays(path: Path, record: dict, predictions: pd.DataFrame) -> N
         raise ValueError("invalid MC probability array")
     if (
         not np.allclose(
-            cal_mc.mean(axis=0), calibration.prob_melanoma, rtol=1e-6, atol=1e-7
+            cal_mc.mean(axis=0),
+            _read_csv(
+                path
+                / "results"
+                / "tables"
+                / f"{architecture}_predictions_calibration.csv"
+            ).get("raw_score", calibration.prob_melanoma),
+            rtol=1e-6,
+            atol=1e-7,
         )
         or not np.allclose(dev_mc.mean(axis=0), dev_prob, rtol=1e-6, atol=1e-7)
-        or not np.allclose(dev_prob, development.prob_melanoma, rtol=1e-6, atol=1e-7)
+        or not np.allclose(
+            dev_prob,
+            _read_csv(
+                path
+                / "results"
+                / "tables"
+                / f"{architecture}_predictions_development.csv"
+            ).get("raw_score", development.prob_melanoma),
+            rtol=1e-6,
+            atol=1e-7,
+        )
         or not np.allclose(
             dev_mc.std(axis=0, ddof=1), dev_uncertainty, rtol=1e-6, atol=1e-7
         )
@@ -252,16 +274,24 @@ def _check_deep_arrays(path: Path, record: dict, predictions: pd.DataFrame) -> N
         raise ValueError("deep array content disagrees with predictions")
     for role, mc in (("calibration", cal_mc), ("development", dev_mc)):
         file = path / "results" / "tables" / f"{architecture}_predictions_{role}.csv"
-        producer = pd.read_csv(file)
+        producer = _read_csv(file)
         required = {"predictive_std", "predictive_entropy", "mutual_information"}
         if not required.issubset(producer.columns):
             raise ValueError("missing deep uncertainty columns")
+        if (
+            record["config"].get("decision_policy_version") is not None
+            and "expected_entropy" not in producer
+        ):
+            raise ValueError("missing deep uncertainty expected entropy")
         expected = uncertainty.summarize_mc_dropout_probabilities(mc)
-        for column, values in (
+        comparisons = [
             ("predictive_std", np.sqrt(expected["variance"])),
             ("predictive_entropy", expected["predictive_entropy"]),
             ("mutual_information", expected["mutual_information"]),
-        ):
+        ]
+        if "expected_entropy" in producer:
+            comparisons.append(("expected_entropy", expected["expected_entropy"]))
+        for column, values in comparisons:
             observed = pd.to_numeric(producer[column], errors="raise").to_numpy(
                 dtype=float
             )
@@ -411,7 +441,7 @@ class RunRecord:
         for role, file in prediction_files.items():
             if role not in splitting.ROLES or not Path(file).is_relative_to(self.path):
                 raise ValueError("invalid prediction artifact")
-            frame = pd.read_csv(file)
+            frame = _read_csv(file)
             normalized = _normalize_predictions(
                 frame,
                 role=role,
@@ -438,6 +468,7 @@ class RunRecord:
             role: str(Path(file).relative_to(self.path))
             for role, file in prediction_files.items()
         }
+        _check_decision_policy(self.path, self.record, manifest, predictions)
         self.record["array_schemas"] = {
             str(file.relative_to(self.path)): {
                 "shape": list(array.shape),
@@ -533,7 +564,7 @@ def validate_run(run_dir: Path, *, input_paths: dict[str, Path] | None = None):
         != manifest["split_hash"]
     ):
         raise ValueError("invalid split manifest content hash")
-    frame = pd.read_csv(path / "predictions.csv")
+    frame = _read_csv(path / "predictions.csv")
     if tuple(frame.columns) != PREDICTION_COLUMNS:
         raise ValueError("prediction schema mismatch")
     roles = record["prediction_roles"]
@@ -553,12 +584,13 @@ def validate_run(run_dir: Path, *, input_paths: dict[str, Path] | None = None):
         producer_name = record["prediction_files"][role]
         if producer_name not in expected_files:
             raise ValueError("missing producer prediction artifact")
-        producer = pd.read_csv(path / producer_name)
+        producer = _read_csv(path / producer_name)
         if not set(PREDICTION_COLUMNS).issubset(producer.columns):
             raise ValueError("producer prediction schema mismatch")
         if not producer[list(PREDICTION_COLUMNS)].equals(subset):
             raise ValueError("producer predictions disagree with shared records")
     _check_deep_arrays(path, record, frame)
+    _check_decision_policy(path, record, manifest, frame)
     return record, frame
 
 
@@ -628,6 +660,8 @@ def recompute_report(run_dir: Path):
             metrics[role][name] = scores
         ece[role] = evaluation.compute_calibration_error(y_true, probabilities)
     result = {"metrics": metrics, "expected_calibration_error": ece}
+    if (Path(run_dir) / "models" / "decision_policy.json").exists():
+        result["calibration_report"] = recompute_calibration_report(run_dir)
     if record["pipeline"].startswith("deep_"):
         file = (
             Path(run_dir)
@@ -635,7 +669,7 @@ def recompute_report(run_dir: Path):
             / "tables"
             / f"{architecture}_predictions_development.csv"
         )
-        frame = pd.read_csv(file)
+        frame = _read_csv(file)
         if not {"predictive_std", "mutual_information"}.issubset(frame.columns):
             raise ValueError("missing uncertainty prediction columns")
         result["mc_dropout_uncertainty"] = {
@@ -646,4 +680,136 @@ def recompute_report(run_dir: Path):
                 frame.mutual_information.mean()
             ),
         }
+    return result
+
+
+def _policy_inputs(path, record, role):
+    producer = _read_csv(path / record["prediction_files"][role])
+    if record["pipeline"].startswith("deep_"):
+        architecture = record["pipeline"].removeprefix("deep_")
+        scores = np.load(
+            path / "arrays" / f"{architecture}_{role}_mc_probabilities.npy",
+            allow_pickle=False,
+        )
+        variances = scores.var(axis=0, ddof=1)
+    else:
+        scores = producer.raw_score.to_numpy(dtype=float)
+        variances = None
+    return producer, scores, variances
+
+
+def _check_decision_policy(path, record, manifest, predictions):
+    file = path / "models" / "decision_policy.json"
+    if not file.exists() and record["config"].get("decision_policy_version") is None:
+        return  # Earlier version-1 runs remain readable.
+    policy = _json(file)
+    if (
+        policy["fit"]["role"] != "calibration"
+        or policy["fit"]["image_ids"] != manifest["partitions"]["calibration"]
+        or policy["fit"]["split_hash"] != manifest["split_hash"]
+    ):
+        raise ValueError(
+            "decision policy fit identity differs from calibration manifest"
+        )
+    if record["pipeline"].startswith("deep_"):
+        architecture = record["pipeline"].removeprefix("deep_")
+        if (
+            policy["model"]["architecture"] != architecture
+            or policy["model"]["checkpoint_sha256"]
+            != sha256(path / "models" / f"{architecture}_mc_dropout.pt")
+            or policy["referral"]["mc_passes"] != record["config"]["mc_samples"]
+        ):
+            raise ValueError("decision policy differs from model or MC protocol")
+        training = _json(path / "results" / "deep_training_metadata.json")
+        weight = training["loss"]["pos_weight"] or 1.0
+    else:
+        weight = 1.0
+    if policy["score_transform"]["positive_weight"] != weight:
+        raise ValueError("decision policy differs from training loss weight")
+    if record["pipeline"].startswith("deep_"):
+        summary_path = path / "results" / f"{architecture}_metrics_summary.json"
+        threshold_key = "selected_threshold_from_calibration"
+    else:
+        summary_path = path / "results" / "metrics_summary.json"
+        threshold_key = "cost_threshold"
+    matrix = _json(summary_path)["cost_matrix"]
+    decision = policy["decision"]
+    if (
+        matrix[threshold_key] != decision["threshold"]
+        or matrix["false_negative"] != decision["cost_fn"]
+        or matrix["false_positive"] != decision["cost_fp"]
+        or matrix["map_threshold"] != 0.5
+        or (
+            "cost_formula_threshold" in matrix
+            and matrix["cost_formula_threshold"] != decision["formula_threshold"]
+        )
+    ):
+        raise ValueError("decision policy disagrees with summary operating points")
+    for role in record["prediction_files"]:
+        producer, scores, variances = _policy_inputs(path, record, role)
+        applied = calibration.apply_policy(policy, scores, variances=variances)
+        for column, expected in (
+            ("prob_melanoma", applied["calibrated_probability"]),
+            ("corrected_score", applied["corrected_score"]),
+        ):
+            observed = producer[column].to_numpy(dtype=float)
+            if not np.isfinite(observed).all() or not np.allclose(
+                observed, expected, rtol=1e-6, atol=1e-7
+            ):
+                raise ValueError(
+                    "decision policy disagrees with fitted prediction scores"
+                )
+        for column in ("prediction", "review_recommended"):
+            if not np.array_equal(producer[column], applied[column]):
+                raise ValueError(
+                    "decision policy disagrees with saved decisions or referral"
+                )
+        if role == "calibration":
+            digest = calibration.fit_data_digest(
+                producer.target.to_numpy(),
+                applied["corrected_score"],
+                producer.image_id.tolist(),
+            )
+            expected_threshold, _ = calibration.select_cost_threshold(
+                producer.target.to_numpy(),
+                applied["calibrated_probability"],
+                decision["cost_fn"],
+                decision["cost_fp"],
+            )
+            if digest != policy["fit"]["data_sha256"]:
+                raise ValueError("decision policy calibration fit data digest mismatch")
+            if expected_threshold != decision["threshold"]:
+                raise ValueError(
+                    "decision policy threshold differs from canonical calibration selection"
+                )
+        if role == "calibration" and variances is not None:
+            expected_cutoffs = np.quantile(
+                variances, policy["referral"]["grid_quantiles"]
+            )
+            if not np.allclose(
+                expected_cutoffs,
+                policy["referral"]["grid_cutoffs"],
+                rtol=1e-6,
+                atol=1e-12,
+            ) or not np.isclose(
+                np.quantile(variances, 0.9),
+                policy["referral"]["variance_cutoff"],
+                rtol=1e-6,
+                atol=1e-12,
+            ):
+                raise ValueError(
+                    "decision policy referral cutoff differs from calibration scores"
+                )
+
+
+def recompute_calibration_report(run_dir):
+    path = Path(run_dir)
+    record, _ = validate_run(path)
+    policy = _json(path / "models" / "decision_policy.json")
+    result = {}
+    for role in ("calibration", "development"):
+        producer, scores, variances = _policy_inputs(path, record, role)
+        result[role] = calibration.policy_report(
+            policy, producer.target.to_numpy(), scores, variances=variances
+        )
     return result
