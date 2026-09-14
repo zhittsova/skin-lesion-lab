@@ -10,10 +10,12 @@ ENV UV_PYTHON_DOWNLOADS=never \
     MPLCONFIGDIR=/tmp/matplotlib \
     PATH="/app/.venv/bin:$PATH"
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock .python-version README.md ./
 RUN uv sync --locked --no-dev --no-cache
-COPY src/ ./src/
-COPY train_pipeline.py train_deep_pipeline.py summarize_results.py plot_mc_dropout_uncertainty.py ./
+COPY . .
 RUN useradd --uid 10001 --user-group --create-home --home-dir /home/appuser \
       --shell /usr/sbin/nologin appuser \
     && mkdir -p /app/data/raw /app/results /app/models /app/runs /app/outputs \
