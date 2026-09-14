@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "task": "melanoma versus selected benign dermoscopic lesions",
+  "canonical_columns": {
+    "isic_id": "string, unique image identifier",
+    "lesion_id": "string, source-supplied lesion grouping identifier",
+    "dx": "string, one of mel/nv/bkl/df/vasc",
+    "target": "int64, melanoma=1 and selected benign=0"
+  },
+  "sources": {
+    "ham10000": {
+      "version": "Original 2018 data descriptor; the linked live archive collection may contain later additions",
+      "landing_page": "https://api.isic-archive.com/collections/212/",
+      "doi": "https://doi.org/10.1038/sdata.2018.161",
+      "accessed_on": "2026-09-14",
+      "license": "CC BY-NC 4.0",
+      "redistribution": "Non-commercial use with attribution; no images or metadata redistributed here.",
+      "modality": "dermoscopic JPEG images",
+      "label_provenance": "Histopathology for over half of lesions; the rest use follow-up, expert consensus, or confocal microscopy as described by the source paper.",
+      "grouping_field": "lesion_id; no patient ID is inferred",
+      "acquisition_population": "Historical pigmented-lesion samples from the Medical University of Vienna and a skin cancer office in Australia; not a general screening population.",
+      "required_metadata_columns": ["image_id", "lesion_id", "dx"],
+      "local_metadata_sha256": null
+    },
+    "isic2018_task3": {
+      "version": "ISIC 2018 Challenge Task 3 training collection",
+      "landing_page": "https://api.isic-archive.com/collections/66/",
+      "terms_page": "https://challenge.isic-archive.com/data/",
+      "doi": "https://doi.org/10.1038/sdata.2018.161",
+      "accessed_on": "2026-09-14",
+      "license": "CC-BY-NC, as stated in the local metadata and challenge data page",
+      "redistribution": "Non-commercial use with attribution; no images or metadata redistributed here.",
+      "modality": "dermoscopic JPEG images",
+      "label_provenance": "Source metadata diagnosis hierarchy and confirmation type; confirmation methods differ across lesions.",
+      "grouping_field": "lesion_id; the archive collection lists no patient IDs",
+      "acquisition_population": "Historical pigmented-lesion samples in the HAM10000-associated ISIC 2018 training collection; not a general screening population.",
+      "required_metadata_columns": ["isic_id", "lesion_id", "diagnosis_1", "diagnosis_2", "diagnosis_3"],
+      "local_metadata_sha256": "12369fc74fb305384384f98d92d09c1ce96704003a5d95266cb762dc040ea242",
+      "local_match_basis": "The local export has 10,015 rows and 7,470 lesion IDs, matching the 2018 Task 3 collection. It has eight diagnosis hierarchy tuples, including separate SCC and solar/actinic keratosis entries; the original HAM metadata uses seven dx groups. Attribution and CC-BY-NC terms also match. No original download receipt, provider checksum, or full collection ID comparison was available."
+    }
+  }
+}

@@ -27,15 +27,19 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 ```
 
-Supply a local ISIC/HAM10000 metadata export with `isic_id`, `lesion_id`, and
-diagnosis columns, plus matching `<isic_id>.jpg` files. The original HAM10000
-`image_id` schema needs normalization before use. Data is not redistributed.
+Supply local metadata and matching JPEG images. Select `ham10000` for a CSV
+with `image_id`, `lesion_id`, and `dx`, or `isic2018_task3` for an ISIC 2018 Task 3
+export with `isic_id`, `lesion_id`, and `diagnosis_1` through `diagnosis_3`.
+The source selection is explicit. See [the source catalog](catalog/sources.json)
+for provenance, terms, and the local metadata checksum. Data is not redistributed.
 
 ```sh
 uv run --locked python train_pipeline.py \
-  --metadata-path /path/to/metadata.csv --images-dir /path/to/images
+  --source isic2018_task3 --metadata-path /path/to/metadata.csv \
+  --images-dir /path/to/images
 uv run --locked python train_deep_pipeline.py \
-  --metadata-path /path/to/metadata.csv --images-dir /path/to/images \
+  --source isic2018_task3 --metadata-path /path/to/metadata.csv \
+  --images-dir /path/to/images \
   --architecture small_cnn --epochs 5
 ```
 
@@ -43,6 +47,12 @@ Data paths default to `data/raw/`. Outputs go to ignored `results/`,
 `models/`, and `runs/` directories. Pretrained EfficientNet weights require
 an explicit `--pretrained` option and download access. Use
 `--fine-tune-backbone` when training EfficientNet from scratch.
+Each pipeline writes `cohort_attrition.json` under its output directory. For
+valid metadata, it records a reason for every row. Rows with unknown diagnoses,
+excluded cancers, or missing or corrupt images cannot enter the binary cohort.
+Invalid IDs, duplicate image content, and conflicting diagnosis fields stop preparation.
+The binary task distinguishes melanoma from selected benign lesions. It does
+not screen for every skin cancer.
 
 ## Container
 
@@ -61,8 +71,8 @@ source, followed by its own tests; it is outside the locked CPU setup.
 
 ## Evaluation status
 
-The next experiments need stricter diagnosis mapping, checks for duplicate
-images and patient overlap, and saved split manifests shared by every model.
+The next experiments need checks for patient overlap and saved split manifests
+shared by every model.
 Calibration also needs data separate from model selection.
 
 CNN training uses class weights, so its outputs need calibration before a

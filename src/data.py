@@ -1,107 +1,19 @@
-"""Loading the csv and images."""
+"""Load validated lesion cohorts and their local images."""
 
+import hashlib
+import json
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pandas as pd
 
+from src.cohort import EmptyCohortError, build_cohort
+
 
 def load_metadata(metadata_path: str) -> pd.DataFrame:
     df = pd.read_csv(metadata_path)
     return df
-
-
-def create_binary_labels(df: pd.DataFrame, target_disease: str = "mel") -> np.ndarray:
-    """1 means melanoma, 0 means not melanoma."""
-    # Different HAM10000 csv files name this a bit differently.
-    labels = np.zeros(len(df), dtype=int)
-
-    if target_disease == "mel":
-        melanoma_mask = pd.Series(False, index=df.index)
-
-        for column in ["dx", "diagnosis", "diagnosis_1", "diagnosis_2", "diagnosis_3"]:
-            if column not in df.columns:
-                continue
-
-            values = df[column].astype(str).str.strip()
-            melanoma_mask = melanoma_mask | values.str.lower().eq("mel")
-            melanoma_mask = melanoma_mask | values.str.contains(
-                "melanoma", case=False, na=False
-            )
-
-        labels[melanoma_mask] = 1
-
-    return labels
-
-
-def create_binary_task_mask(df: pd.DataFrame, labels: np.ndarray) -> np.ndarray:
-    """Keep melanoma and benign rows, drop the other cancer classes."""
-    melanoma_mask = pd.Series(labels == 1, index=df.index)
-    benign_mask = pd.Series(False, index=df.index)
-
-    for column in ["diagnosis", "diagnosis_1", "diagnosis_2", "diagnosis_3"]:
-        if column in df.columns:
-            benign_mask = benign_mask | df[column].astype(str).str.contains(
-                "benign", case=False, na=False
-            )
-
-    if "dx" in df.columns:
-        benign_dx_codes = {"nv", "bkl", "df", "vasc"}
-        benign_mask = benign_mask | df["dx"].astype(str).str.lower().isin(
-            benign_dx_codes
-        )
-
-    if not benign_mask.any():
-        benign_mask = pd.Series(labels == 0, index=df.index)
-
-    return (melanoma_mask | benign_mask).to_numpy()
-
-
-def get_multiclass_codes(df: pd.DataFrame) -> np.ndarray:
-    codes = []
-
-    for _, row in df.iterrows():
-        if "dx" in df.columns and pd.notna(row.get("dx")):
-            codes.append(str(row["dx"]).lower())
-            continue
-
-        text = " ".join(
-            str(row.get(col, ""))
-            for col in ["diagnosis_1", "diagnosis_2", "diagnosis_3"]
-        ).lower()
-
-        if "melanoma" in text:
-            codes.append("mel")
-        elif "nevus" in text:
-            codes.append("nv")
-        elif "keratosis" in text and "actinic" not in text and "solar" not in text:
-            codes.append("bkl")
-        elif "basal cell" in text:
-            codes.append("bcc")
-        elif "actinic" in text or "solar" in text:
-            codes.append("akiec")
-        elif "vascular" in text:
-            codes.append("vasc")
-        elif "dermatofibroma" in text or "fibro-histiocytic" in text:
-            codes.append("df")
-        elif "squamous cell" in text:
-            codes.append("scc")
-        else:
-            codes.append("other")
-
-    return np.array(codes)
-
-
-def filter_valid_images(df: pd.DataFrame, images_dir: Path) -> pd.DataFrame:
-    """Only keep rows where the jpg is actually there."""
-    valid_indices = []
-    for idx, row in df.iterrows():
-        img_path = images_dir / f"{row['isic_id']}.jpg"
-        if img_path.exists():
-            valid_indices.append(idx)
-
-    return df.loc[valid_indices].reset_index(drop=True)
 
 
 def load_image_rgb(
@@ -140,21 +52,38 @@ def get_lesion_ids(df: pd.DataFrame) -> np.ndarray:
 
 
 def prepare_dataset(
-    metadata_path: str, images_dir: str
+    metadata_path: str,
+    images_dir: str,
+    *,
+    source: str,
+    attrition_path: str | Path,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-    df = load_metadata(metadata_path)
-    images_path = Path(images_dir)
-
-    df = filter_valid_images(df, images_path)
-
-    labels_all = create_binary_labels(df)
-    binary_task_mask = create_binary_task_mask(df, labels_all)
-    df = df.loc[binary_task_mask].reset_index(drop=True)
-    labels = labels_all[binary_task_mask]
-
-    image_ids = get_image_ids(df)
-
-    return df, image_ids, labels
+    audit_path = Path(attrition_path)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cohort = build_cohort(metadata_path, images_dir, source=source)
+        counts, outcomes = cohort.counts, cohort.outcomes
+    except EmptyCohortError as exc:
+        counts, outcomes = exc.counts, exc.outcomes
+        cohort = None
+    audit_path.write_text(
+        json.dumps(
+            {
+                "source": source,
+                "metadata_sha256": hashlib.sha256(
+                    Path(metadata_path).read_bytes()
+                ).hexdigest(),
+                "counts": counts,
+                "outcomes": outcomes,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    if cohort is None:
+        raise ValueError("empty cohort")
+    df = cohort.frame
+    return df, get_image_ids(df), df["target"].to_numpy()
 
 
 def get_class_statistics(labels: np.ndarray) -> dict[str, int]:

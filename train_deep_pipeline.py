@@ -39,6 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metadata-path", type=Path, default=dataset_path / "metadata.csv"
     )
+    parser.add_argument(
+        "--source", choices=["ham10000", "isic2018_task3"], required=True
+    )
     parser.add_argument("--images-dir", type=Path, default=dataset_path)
     parser.add_argument("--results-dir", type=Path, default=project_path / "results")
     parser.add_argument("--runs-dir", type=Path, default=project_path / "runs")
@@ -385,7 +388,10 @@ def main() -> None:
     print("Project-owned deep MC Dropout pipeline")
     print("1. loading data")
     df, image_ids, labels = data.prepare_dataset(
-        str(args.metadata_path), str(args.images_dir)
+        str(args.metadata_path),
+        str(args.images_dir),
+        source=args.source,
+        attrition_path=args.runs_dir / "cohort_attrition.json",
     )
     lesion_ids = data.get_lesion_ids(df)
 
