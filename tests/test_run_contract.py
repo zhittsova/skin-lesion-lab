@@ -80,7 +80,7 @@ class RunContractTests(unittest.TestCase):
                 )
                 self.assertIn("development", report["expected_calibration_error"])
 
-    def test_gmm_failure_reasons_are_diagnostic(self):
+    def test_failure_reasons_are_diagnostic(self):
         examples = {
             "GMM did not converge": "gmm_nonconvergence",
             "logistic fit did not converge": "logistic_nonconvergence",
@@ -89,12 +89,18 @@ class RunContractTests(unittest.TestCase):
             "reg_covar must be positive": "invalid_gmm_configuration",
             "max_iter must be positive": "invalid_gmm_configuration",
             "invalid GMM covariance_type": "invalid_gmm_configuration",
+            "conflicting lesion diagnoses for L0_000": "invalid_cohort",
         }
         for message, expected in examples.items():
             with self.subTest(message=message):
                 self.assertEqual(
                     self.contract._failure_reason(ValueError(message)), expected
                 )
+
+    def test_interrupted_run_has_a_diagnostic_reason(self):
+        self.assertEqual(
+            self.contract._failure_reason(KeyboardInterrupt("stopped")), "interrupted"
+        )
 
     def test_nonfinite_configuration_is_recorded_safely(self):
         for name, value in (("nan", float("nan")), ("inf", float("inf"))):
