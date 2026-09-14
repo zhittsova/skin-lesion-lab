@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from src import (
     bayes,
+    calibration,
     classical,
     data,
     evaluation,
@@ -69,7 +70,11 @@ def main():
         args.runs_dir,
         run_id=getattr(args, "run_id", None),
         pipeline=f"classical_{model_kind}",
-        config={**vars(args), "training_seed": getattr(args, "seed", 42)},
+        config={
+            **vars(args),
+            "training_seed": getattr(args, "seed", 42),
+            "decision_policy_version": 1,
+        },
         inputs={
             "metadata": args.metadata_path,
             "split_manifest": args.split_manifest,
@@ -90,7 +95,7 @@ def main():
             manifest,
             {
                 role: local.results_dir / "tables" / f"predictions_{role}.csv"
-                for role in ("train", "selection", "development")
+                for role in ("train", "selection", "calibration", "development")
             },
         )
     except BaseException as error:
@@ -167,6 +172,7 @@ melanoma: {class_stats["melanoma"]}""")
     train_valid_idx = split_indices["train"]
     selection_valid_idx = split_indices["selection"]
     development_valid_idx = split_indices["development"]
+    calibration_valid_idx = split_indices["calibration"]
     train_mean = train_std = None
     if model_kind != "prevalence":
         X_train_raw, train_valid_idx = load_and_extract_features(
@@ -175,12 +181,18 @@ melanoma: {class_stats["melanoma"]}""")
         X_selection_raw, selection_valid_idx = load_and_extract_features(
             selection_valid_idx, "Selection set"
         )
+        X_calibration_raw, calibration_valid_idx = load_and_extract_features(
+            calibration_valid_idx, "Calibration set"
+        )
         X_development_raw, development_valid_idx = load_and_extract_features(
             development_valid_idx, "Development holdout set"
         )
         if model_kind == "gmm":
             # GMM scaling uses training statistics; logistic owns its train scaler.
             X_train, train_mean, train_std = features.standardize_features(X_train_raw)
+            X_calibration = features.apply_standardization(
+                X_calibration_raw, train_mean, train_std
+            )
             X_selection = features.apply_standardization(
                 X_selection_raw, train_mean, train_std
             )
@@ -188,6 +200,7 @@ melanoma: {class_stats["melanoma"]}""")
                 X_development_raw, train_mean, train_std
             )
         else:
+            X_calibration = X_calibration_raw
             X_train, X_selection, X_development = (
                 X_train_raw,
                 X_selection_raw,
@@ -198,6 +211,7 @@ melanoma: {class_stats["melanoma"]}""")
         X_selection = np.empty((len(selection_valid_idx), 0))
         X_development = np.empty((len(development_valid_idx), 0))
 
+    y_calibration = labels[calibration_valid_idx]
     y_train = labels[train_valid_idx]
     y_selection = labels[selection_valid_idx]
     y_development = labels[development_valid_idx]
@@ -214,9 +228,9 @@ development: {X_development.shape[0]} samples""")
     selection_info = None
     if model_kind == "prevalence":
         fitted = classical.fit_prevalence(y_train)
+        probs_calibration = classical.predict_prevalence(fitted, len(y_calibration))
         probs_train = classical.predict_prevalence(fitted, len(y_train))
         probs_selection = classical.predict_prevalence(fitted, len(y_selection))
-        probs_development = classical.predict_prevalence(fitted, len(y_development))
     elif model_kind == "logistic":
         fitted, selection_info = classical.fit_logistic(
             X_train,
@@ -225,9 +239,9 @@ development: {X_development.shape[0]} samples""")
             y_selection,
             seed=getattr(args, "seed", 42),
         )
+        probs_calibration = classical.predict_logistic(fitted, X_calibration)
         probs_train = classical.predict_logistic(fitted, X_train)
         probs_selection = classical.predict_logistic(fitted, X_selection)
-        probs_development = classical.predict_logistic(fitted, X_development)
     elif model_kind == "gmm":
         fitted, selection_info = gmm.train_class_gmms_auto(
             X_train,
@@ -247,23 +261,57 @@ development: {X_development.shape[0]} samples""")
             )
             return bayes.get_melanoma_probability(probabilities)
 
+        probs_calibration = posterior(X_calibration)
         probs_train = posterior(X_train)
         probs_selection = posterior(X_selection)
-        probs_development = posterior(X_development)
     else:
         raise ValueError("invalid classical model")
 
-    for probabilities in (probs_train, probs_selection, probs_development):
+    for probabilities in (probs_train, probs_selection, probs_calibration):
         if not np.isfinite(probabilities).all() or np.any(
             (probabilities < 0) | (probabilities > 1)
         ):
             raise ValueError("invalid classical probabilities")
 
-    print("\n5. compute probabilities")
+    policy = calibration.fit_policy(
+        y_calibration,
+        probs_calibration,
+        image_ids=image_ids[calibration_valid_idx],
+        split_hash=split_report["split_hash"],
+        cost_fn=10.0,
+        cost_fp=1.0,
+    )
+    reporting.save_json(policy, MODELS_PATH / "decision_policy.json")
+    if model_kind == "prevalence":
+        probs_development = classical.predict_prevalence(fitted, len(y_development))
+    elif model_kind == "logistic":
+        probs_development = classical.predict_logistic(fitted, X_development)
+    else:
+        probs_development = posterior(X_development)
+    raw_scores = dict(
+        train=probs_train,
+        selection=probs_selection,
+        calibration=probs_calibration,
+        development=probs_development,
+    )
+    applied = {
+        role: calibration.apply_policy(policy, scores)
+        for role, scores in raw_scores.items()
+    }
+    probs_train, probs_selection, probs_calibration, probs_development = (
+        applied[role]["calibrated_probability"]
+        for role in ("train", "selection", "calibration", "development")
+    )
+    calibration_report = {
+        role: calibration.policy_report(policy, y, raw_scores[role])
+        for role, y in (("calibration", y_calibration), ("development", y_development))
+    }
+    reporting.save_json(calibration_report, RESULTS_PATH / "calibration_report.json")
+    print("\n5. compute fitted probabilities")
 
     print(f"""
-posterior probabilities computed
-class priors: P(benign)={class_priors[0]:.4f}, P(melanoma)={class_priors[1]:.4f}
+fitted probabilities computed
+training class priors: P(benign)={class_priors[0]:.4f}, P(melanoma)={class_priors[1]:.4f}
 
 6. threshold with the cost matrix""")
 
@@ -272,12 +320,12 @@ class priors: P(benign)={class_priors[0]:.4f}, P(melanoma)={class_priors[1]:.4f}
     COST_FP = 1.0
 
     bayes.print_cost_analysis(COST_FN, COST_FP)
-    cost_threshold = COST_FP / (COST_FP + COST_FN)
+    cost_threshold = policy["decision"]["threshold"]
     map_threshold = 0.5
 
-    preds_train = bayes.threshold_with_costs(probs_train, COST_FN, COST_FP)
-    preds_selection = bayes.threshold_with_costs(probs_selection, COST_FN, COST_FP)
-    preds_development = bayes.threshold_with_costs(probs_development, COST_FN, COST_FP)
+    preds_train = (probs_train >= cost_threshold).astype(int)
+    preds_selection = (probs_selection >= cost_threshold).astype(int)
+    preds_development = (probs_development >= cost_threshold).astype(int)
 
     preds_train_map = (probs_train >= map_threshold).astype(int)
     preds_selection_map = (probs_selection >= map_threshold).astype(int)
@@ -373,7 +421,21 @@ development: {ece_development:.4f}""")
             "map_threshold": metrics_development_map,
         },
     }
+    metrics_by_split["calibration"] = {}
+    for name, cutoff in (
+        ("cost_threshold", cost_threshold),
+        ("map_threshold", map_threshold),
+    ):
+        scores = evaluation.compute_classification_metrics(
+            y_calibration, (probs_calibration >= cutoff).astype(int), probs_calibration
+        )
+        metrics_by_split["calibration"][name] = evaluation.add_average_cost(
+            scores, len(y_calibration), COST_FN, COST_FP
+        )
     ece_by_split = {
+        "calibration": evaluation.compute_calibration_error(
+            y_calibration, probs_calibration
+        ),
         "train": ece_train,
         "selection": ece_selection,
         "development": ece_development,
@@ -416,7 +478,13 @@ development: {ece_development:.4f}""")
         },
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
-        "notes": ["All model comparisons use the same frozen development manifest."],
+        "score_semantics": "calibration-fitted probability; raw scores retained separately",
+        "decision_policy": "models/decision_policy.json",
+        "calibration_report": calibration_report,
+        "notes": [
+            "All model comparisons use the same frozen development manifest.",
+            "Costs are illustrative. Fitted calibration does not establish deployment calibration.",
+        ],
     }
     if model_kind == "gmm":
         metrics_summary["bic_selection"] = reporting.selection_summary(selection_info)
@@ -519,6 +587,9 @@ plots generated and saved
                 "prediction": predictions,
                 "prediction_map": map_predictions,
                 "prob_melanoma": probabilities,
+                "raw_score": raw_scores[split_name],
+                "corrected_score": applied[split_name]["corrected_score"],
+                "review_recommended": applied[split_name]["review_recommended"],
                 "score": np.where(predictions == 1, probabilities, 1 - probabilities),
                 "model_name": f"classical_{model_kind}",
             }
@@ -553,10 +624,20 @@ plots generated and saved
         "development",
     )
 
+    save_predictions(
+        image_ids[calibration_valid_idx],
+        applied["calibration"]["prediction"],
+        (probs_calibration >= 0.5).astype(int),
+        probs_calibration,
+        y_calibration,
+        "calibration",
+    )
+
     print("""
 11. save model""")
 
     model_info = {
+        "decision_policy": policy,
         "model_kind": model_kind,
         "split_hash": split_report["split_hash"],
         "cohort_hash": split_report["cohort_hash"],

@@ -220,7 +220,7 @@ class ClassicalRunTests(unittest.TestCase):
                             )
                         )
                 np.testing.assert_allclose(
-                    reloaded, producer.prob_melanoma.to_numpy(), atol=1e-12
+                    reloaded, producer.raw_score.to_numpy(), atol=1e-12
                 )
                 summary = json.loads(
                     (run / "results" / "metrics_summary.json").read_text()

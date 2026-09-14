@@ -2,6 +2,9 @@
 
 import numpy as np
 
+from src.calibration import cost_threshold
+from src.calibration import probabilities as validate_probabilities
+
 
 def compute_class_priors(y: np.ndarray) -> np.ndarray:
     unique, counts = np.unique(y, return_counts=True)
@@ -33,15 +36,15 @@ def get_melanoma_probability(posteriors: np.ndarray) -> np.ndarray:
 def threshold_with_costs(
     probabilities: np.ndarray, cost_fn: float = 1.0, cost_fp: float = 1.0
 ) -> np.ndarray:
-    threshold = cost_fp / (cost_fp + cost_fn)
+    threshold = cost_threshold(cost_fn, cost_fp)
 
-    predictions = (probabilities >= threshold).astype(int)
+    predictions = (validate_probabilities(probabilities) >= threshold).astype(int)
 
     return predictions
 
 
 def get_threshold_info(cost_fn: float, cost_fp: float) -> dict[str, float | str]:
-    threshold = cost_fp / (cost_fp + cost_fn)
+    threshold = cost_threshold(cost_fn, cost_fp)
     cost_ratio = cost_fn / cost_fp
 
     return {
@@ -77,7 +80,7 @@ def compute_predicted_scores(
 
 
 def print_cost_analysis(cost_fn: float, cost_fp: float) -> None:
-    threshold = cost_fp / (cost_fp + cost_fn)
+    threshold = cost_threshold(cost_fn, cost_fp)
     cost_ratio = cost_fn / cost_fp
 
     print(

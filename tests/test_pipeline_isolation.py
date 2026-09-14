@@ -106,6 +106,43 @@ class PipelineIsolationTests(unittest.TestCase):
             ):
                 pipeline.main()
 
+    def test_classical_saved_calibrator_ignores_heldout_labels_and_features(self):
+        import train_pipeline as pipeline
+
+        self.args.model = "logistic"
+        snapshots = []
+        for value in (-999, 999):
+            labels = self.labels.copy()
+            labels[self.parts["development"]] = int(value > 0)
+
+            def load(path, target_size):
+                index = list(self.ids).index(Path(path).stem)
+                return (
+                    value
+                    if index in self.parts["development"]
+                    else float(self.labels[index]) + index / 1000
+                )
+
+            with (
+                patch.object(
+                    pipeline.data,
+                    "prepare_dataset",
+                    return_value=(self.frame, self.ids, labels),
+                ),
+                patch.object(pipeline.data, "load_image_hsv", side_effect=load),
+                patch.object(
+                    pipeline.features,
+                    "compute_hsv_histograms_batch",
+                    side_effect=lambda images: np.array(images).reshape(-1, 1),
+                ),
+                patch.object(pipeline, "plots", Mock()),
+            ):
+                pipeline._run(self.args)
+            snapshots.append(
+                (self.args.models_dir / "decision_policy.json").read_bytes()
+            )
+        self.assertEqual(snapshots[0], snapshots[1])
+
     def test_classical_stops_on_image_failure_without_dropping_members(self):
         import train_pipeline as pipeline
 
@@ -129,6 +166,7 @@ class PipelineIsolationTests(unittest.TestCase):
     def test_deep_checkpoint_and_threshold_use_distinct_roles(self):
         import train_deep_pipeline as pipeline
 
+        snapshots = []
         for sentinel in (777, 999):
             labels = self.labels.copy()
             labels[self.parts["development"]] = sentinel
@@ -165,11 +203,19 @@ class PipelineIsolationTests(unittest.TestCase):
 
             def mc(**kwargs):
                 batch = kwargs["dataloader"]
+                if np.array_equal(batch["indices"], self.parts["development"]):
+                    self.assertTrue((batch["labels"] == sentinel).all())
+                    policies = sorted(
+                        self.args.runs_dir.glob("*/models/decision_policy.json")
+                    )
+                    snapshots.append(policies[-1].read_bytes())
+                    raise RoutingComplete
                 check_loader(batch, "calibration")
                 return {
                     "label": batch["labels"],
                     "mean_probability": np.full(len(batch["labels"]), 0.5),
                     "all_probabilities": np.full((2, len(batch["labels"])), 0.5),
+                    "image_id": batch["ids"].tolist(),
                 }
 
             def threshold(y, probabilities, **kwargs):
@@ -177,7 +223,7 @@ class PipelineIsolationTests(unittest.TestCase):
                 self.assertEqual(
                     calls, ["train", "selection", "selection", "calibration"]
                 )
-                raise RoutingComplete
+                return 0.0, __import__("pandas").DataFrame([{"threshold": 0.0}])
 
             with (
                 patch.object(pipeline, "parse_args", return_value=self.args),
@@ -211,6 +257,9 @@ class PipelineIsolationTests(unittest.TestCase):
                 self.assertRaises(RoutingComplete),
             ):
                 pipeline.main()
+
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[0], snapshots[1])
 
     def test_both_entrypoints_reject_confirmation_before_fit(self):
         import train_deep_pipeline

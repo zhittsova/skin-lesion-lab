@@ -56,3 +56,11 @@ new execution a new run ID. The stored paths are placeholders because data may
 live elsewhere on another machine. `summarize_results.py --run-dir runs/<run-id>`
 validates a completed run and recomputes its reported operating-point scores
 from saved predictions. It does not open the training images or metadata.
+
+Calibration-enabled runs store `models/decision_policy.json` and
+`results/calibration_report.json`. Shared `prob_melanoma` values are fitted
+probabilities; producer tables also keep raw and corrected scores. Validation
+checks policy identity, deep checkpoint and pass count, and replays probability,
+decision and referral fields. Prediction-only summaries recompute proper scores,
+reliability bins and retained-set metrics from saved scores and the locked policy.
+Earlier runs without a policy retain their original score meaning.
