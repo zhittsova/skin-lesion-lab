@@ -4,10 +4,11 @@ Computer vision and deep learning experiments for skin lesion classification.
 The task is to distinguish melanoma from benign lesions using HSV histograms
 with Gaussian mixture models, a small CNN, and EfficientNet-B0.
 
-Images of the same lesion stay in the same train, validation, or test split.
-The classical pipeline fits standardization on training data. Evaluation compares
-decision thresholds under asymmetric costs, and Monte Carlo dropout estimates
-how much CNN predictions vary across stochastic passes.
+Every model loads one frozen development split manifest. Linked lesions,
+complete patient IDs when available, and known duplicate clusters stay together.
+Training, model selection, calibration and development evaluation use distinct
+groups. The [evaluation protocol](docs/evaluation-protocol.md) records data use,
+seeds, comparison budgets, endpoints and confirmation limits.
 
 The project is experimental and has not been clinically validated. Earlier
 results still need a methodological audit before they can serve as benchmarks.
@@ -34,12 +35,15 @@ The source selection is explicit. See [the source catalog](catalog/sources.json)
 for provenance, terms, and the local metadata checksum. Data is not redistributed.
 
 ```sh
+uv run --locked python freeze_splits.py \
+  --source isic2018_task3 --metadata-path /path/to/metadata.csv \
+  --images-dir /path/to/images --split-manifest runs/development-v1.json
 uv run --locked python train_pipeline.py \
   --source isic2018_task3 --metadata-path /path/to/metadata.csv \
-  --images-dir /path/to/images
+  --images-dir /path/to/images --split-manifest runs/development-v1.json
 uv run --locked python train_deep_pipeline.py \
   --source isic2018_task3 --metadata-path /path/to/metadata.csv \
-  --images-dir /path/to/images \
+  --images-dir /path/to/images --split-manifest runs/development-v1.json \
   --architecture small_cnn --epochs 5
 ```
 
@@ -71,9 +75,19 @@ source, followed by its own tests; it is outside the locked CPU setup.
 
 ## Evaluation status
 
-The next experiments need checks for patient overlap and saved split manifests
-shared by every model.
-Calibration also needs data separate from model selection.
+The current cohort has lesion IDs, not verified patient identities. Unknown
+patient and near-duplicate links remain a limitation. Optional `patient_id` and
+`duplicate_cluster_id` metadata columns preserve known links; partial patient
+IDs or mixed-label linked groups stop allocation. Image-level run limits are
+not supported because they would change the frozen cohort.
+
+The manifest checks all metadata cells and eligible image bytes on each fresh
+preparation. Rerunning the freeze command validates an existing manifest; it does
+not replace it. Changed data requires an explicit new protocol and manifest.
+Output names use `selection`, `calibration` and `development` to distinguish these
+roles from legacy `val` and `test` artifacts. Classical calibration is reserved
+for later implementation. Deep checkpoint selection and threshold selection use
+separate roles. Both CLIs reject confirmation-purpose manifests.
 
 CNN training uses class weights, so its outputs need calibration before a
 probability-based cost threshold can be interpreted as an optimal decision rule.
