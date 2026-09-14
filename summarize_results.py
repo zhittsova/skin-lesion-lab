@@ -26,6 +26,9 @@ def main() -> None:
         "--metadata-path", type=Path, default=project_path / "data/raw/metadata.csv"
     )
     parser.add_argument("--images-dir", type=Path, default=project_path / "data/raw")
+    parser.add_argument(
+        "--source", choices=["ham10000", "isic2018_task3"], required=True
+    )
     parser.add_argument("--results-dir", type=Path, default=project_path / "results")
     parser.add_argument(
         "--model-path",
@@ -63,7 +66,12 @@ def main() -> None:
             pred_df["prob_melanoma"].to_numpy(),
         )
 
-    df, _, labels = data.prepare_dataset(str(metadata_path), str(dataset_path))
+    df, _, labels = data.prepare_dataset(
+        str(metadata_path),
+        str(dataset_path),
+        source=args.source,
+        attrition_path=results_path / "cohort_attrition.json",
+    )
     lesion_ids = data.get_lesion_ids(df)
     split_indices = splitting.split_dataset(
         lesion_ids,

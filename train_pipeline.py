@@ -30,6 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metadata-path", type=Path, default=dataset_path / "metadata.csv"
     )
+    parser.add_argument(
+        "--source", choices=["ham10000", "isic2018_task3"], required=True
+    )
     parser.add_argument("--images-dir", type=Path, default=dataset_path)
     parser.add_argument("--results-dir", type=Path, default=project_path / "results")
     parser.add_argument("--models-dir", type=Path, default=project_path / "models")
@@ -51,23 +54,13 @@ def main():
 Bayesian melanoma classifier
 
 1. loading data""")
-    raw_df = data.load_metadata(str(METADATA_PATH))
-    raw_df = data.filter_valid_images(raw_df, IMAGES_DIR)
-    raw_codes = data.get_multiclass_codes(raw_df)
-
     plots.set_style()
-    plots.plot_named_distribution(
-        raw_codes,
-        save_path=str(RESULTS_PATH / "figures" / "raw_class_distribution.png"),
-        title="Raw HAM10000 class distribution",
+    df, image_ids, labels = data.prepare_dataset(
+        str(METADATA_PATH),
+        str(IMAGES_DIR),
+        source=args.source,
+        attrition_path=RESULTS_PATH / "cohort_attrition.json",
     )
-    plots.plot_named_pie(
-        raw_codes,
-        save_path=str(RESULTS_PATH / "figures" / "raw_class_distribution_pie.png"),
-        title="Raw HAM10000 class distribution pie",
-    )
-
-    df, image_ids, labels = data.prepare_dataset(str(METADATA_PATH), str(IMAGES_DIR))
 
     class_stats = data.get_class_statistics(labels)
     print(f"""
