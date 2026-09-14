@@ -22,6 +22,11 @@ that diff and those source files under `inputs/`. The `environment` object recor
 Python, platform, machine, package versions, and the selected device. No exported
 field needs a local absolute data path.
 
+The classical command uses `classical_prevalence`, `classical_logistic` or
+`classical_gmm` as its pipeline and model key. Each produces the same
+prediction roles and metrics summary. A failed GMM fit records whether
+the setting was invalid or the optimizer did not converge.
+
 `predictions.csv` is the common row contract. It has exactly these columns:
 `schema_version`, `run_id`, `model_key`, `role`, `split_hash`, `image_id`,
 `lesion_id`, `group_id`, `target`, `prob_melanoma`, and `prediction`. The group ID
