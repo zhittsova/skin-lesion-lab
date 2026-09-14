@@ -25,6 +25,7 @@ class PipelineIsolationTests(unittest.TestCase):
         self.manifest = splitting.create_manifest(self.frame)
         self.path = self.root / "splits.json"
         splitting.save_manifest(self.manifest, self.path)
+        (self.root / "metadata.csv").write_text("synthetic metadata\n")
         self.parts = splitting.manifest_indices(self.frame, self.manifest)
         self.ids = self.frame.isic_id.to_numpy()
         self.labels = self.frame.target.to_numpy().copy()

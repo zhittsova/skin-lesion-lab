@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import time
 from pathlib import Path
 
@@ -12,7 +14,16 @@ import pandas as pd
 import seaborn as sns
 import torch
 from sklearn.metrics import roc_curve
-from src import data, deep, evaluation, plots, reporting, splitting, uncertainty
+from src import (
+    data,
+    deep,
+    evaluation,
+    plots,
+    reporting,
+    run_contract,
+    splitting,
+    uncertainty,
+)
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -44,9 +55,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--images-dir", type=Path, default=dataset_path)
-    parser.add_argument("--results-dir", type=Path, default=project_path / "results")
     parser.add_argument("--runs-dir", type=Path, default=project_path / "runs")
-    parser.add_argument("--models-dir", type=Path, default=project_path / "models")
+    parser.add_argument("--run-id", help="Unique run ID; generated when omitted.")
+    parser.add_argument(
+        "--resume-from", help="Failed run ID to retry in a new directory."
+    )
     parser.add_argument(
         "--architecture",
         choices=["small_cnn", "efficientnet_b0"],
@@ -307,7 +320,6 @@ def save_predictions(
     output_path: Path,
 ) -> pd.DataFrame:
     frame = build_uncertainty_frame(mc_result, threshold=threshold)
-    frame["image_path"] = mc_result["image_path"]
     frame["score"] = np.where(
         frame["prediction"] == 1,
         frame["mean_prob_melanoma"],
@@ -321,6 +333,44 @@ def save_predictions(
 
 def main() -> None:
     args = parse_args()
+    run = run_contract.RunRecord.start(
+        args.runs_dir,
+        run_id=getattr(args, "run_id", None),
+        pipeline=f"deep_{args.architecture}",
+        config=vars(args),
+        inputs={
+            "metadata": args.metadata_path,
+            "split_manifest": args.split_manifest,
+            "dependency_lock": Path(__file__).with_name("uv.lock"),
+        },
+        resume_from=getattr(args, "resume_from", None),
+    )
+    local = copy.copy(args)
+    local.results_dir = run.path / "results"
+    local.models_dir = run.path / "models"
+    local.runs_dir = run.path / "arrays"
+    stage = "training"
+    try:
+        device = _run(local)
+        run.record["environment"]["device"] = str(device)
+        stage = "finalize"
+        manifest = json.loads(args.split_manifest.read_text())
+        run.finish(
+            manifest,
+            {
+                role: local.results_dir
+                / "tables"
+                / f"{args.architecture}_predictions_{role}.csv"
+                for role in ("calibration", "development")
+            },
+        )
+    except BaseException as error:
+        run.fail(error, stage=stage)
+        raise
+    print(f"completed run: {run.path}")
+
+
+def _run(args) -> None:
     if args.epochs <= 0:
         raise ValueError(
             "epochs must be positive; a checkpoint must be selected this run"
@@ -570,7 +620,7 @@ def main() -> None:
         threshold=selected_threshold,
         output_path=tables_dir / f"{args.architecture}_predictions_development.csv",
     )
-    calibration_predictions = save_predictions(
+    save_predictions(
         calibration_mc,
         threshold=selected_threshold,
         output_path=tables_dir / f"{args.architecture}_predictions_calibration.csv",
@@ -643,7 +693,7 @@ def main() -> None:
             "weight_decay": args.weight_decay,
             "pos_weight": pos_weight,
             "history": history,
-            "best_checkpoint": str(best_checkpoint),
+            "best_checkpoint": f"models/{best_checkpoint.name}",
         },
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
@@ -662,33 +712,15 @@ def main() -> None:
             ),
         },
         "artifacts": {
-            "development_mc_probabilities": str(
-                args.runs_dir / f"{args.architecture}_development_mc_probabilities.npy"
-            ),
-            "development_predictions": str(
-                tables_dir / f"{args.architecture}_predictions_development.csv"
-            ),
-            "uncertainty_distribution": str(
-                figures_dir
-                / f"{args.architecture}_mc_dropout_uncertainty_distribution.png"
-            ),
-            "mean_vs_epistemic_uncertainty": str(
-                figures_dir
-                / f"{args.architecture}_mc_dropout_mean_vs_epistemic_uncertainty.png"
-            ),
+            "development_mc_probabilities": f"arrays/{args.architecture}_development_mc_probabilities.npy",
+            "development_predictions": f"results/tables/{args.architecture}_predictions_development.csv",
+            "uncertainty_distribution": f"results/figures/{args.architecture}_mc_dropout_uncertainty_distribution.png",
+            "mean_vs_epistemic_uncertainty": f"results/figures/{args.architecture}_mc_dropout_mean_vs_epistemic_uncertainty.png",
         },
         "runtime_seconds": time.time() - start_time,
     }
     reporting.save_json(
         summary, args.results_dir / f"{args.architecture}_metrics_summary.json"
-    )
-
-    # Keep a clearly named copy for slide-building convenience.
-    development_predictions.to_csv(
-        tables_dir / "deep_mc_dropout_uncertainty_development.csv", index=False
-    )
-    calibration_predictions.to_csv(
-        tables_dir / "deep_mc_dropout_uncertainty_calibration.csv", index=False
     )
 
     print(
@@ -698,6 +730,7 @@ def main() -> None:
         f"saved real MC probabilities: {args.runs_dir / f'{args.architecture}_development_mc_probabilities.npy'}"
     )
     print(f"saved figures: {figures_dir}")
+    return device
 
 
 if __name__ == "__main__":
