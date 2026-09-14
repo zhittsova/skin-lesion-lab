@@ -36,17 +36,17 @@ class RunContractTests(unittest.TestCase):
             "dependency_lock": self.lock,
         }
 
-    def start(self, run_id="trial-a"):
+    def start(self, run_id="trial-a", pipeline="classical_gmm"):
         return self.contract.RunRecord.start(
             self.root / "runs",
             run_id=run_id,
-            pipeline="classical_gmm",
+            pipeline=pipeline,
             config={"seed": 42, "source": "ham10000", "metadata_path": self.metadata},
             inputs=self.inputs,
         )
 
-    def complete(self):
-        run = self.start()
+    def complete(self, pipeline="classical_gmm"):
+        run = self.start(run_id=pipeline, pipeline=pipeline)
         files = {}
         by_id = {row["image_id"]: row for row in self.manifest["rows"]}
         for role in ("train", "development"):
@@ -62,8 +62,55 @@ class RunContractTests(unittest.TestCase):
                 }
             ).to_csv(path, index=False)
             files[role] = path
+        summary = run.path / "results" / "metrics_summary.json"
+        summary.write_text(
+            json.dumps({"cost_matrix": {"false_negative": 10, "false_positive": 1}})
+        )
         run.finish(self.manifest, files)
         return run
+
+    def test_classical_comparators_recompute_cost_and_map_reports(self):
+        for pipeline in ("classical_prevalence", "classical_logistic"):
+            with self.subTest(pipeline=pipeline):
+                run = self.complete(pipeline)
+                report = self.contract.recompute_report(run.path)
+                self.assertEqual(
+                    set(report["metrics"]["development"]),
+                    {"cost_threshold", "map_threshold"},
+                )
+                self.assertIn("development", report["expected_calibration_error"])
+
+    def test_gmm_failure_reasons_are_diagnostic(self):
+        examples = {
+            "GMM did not converge": "gmm_nonconvergence",
+            "logistic fit did not converge": "logistic_nonconvergence",
+            "max_components must be positive": "invalid_gmm_configuration",
+            "n_components exceeds class rows": "invalid_gmm_configuration",
+            "reg_covar must be positive": "invalid_gmm_configuration",
+            "max_iter must be positive": "invalid_gmm_configuration",
+            "invalid GMM covariance_type": "invalid_gmm_configuration",
+        }
+        for message, expected in examples.items():
+            with self.subTest(message=message):
+                self.assertEqual(
+                    self.contract._failure_reason(ValueError(message)), expected
+                )
+
+    def test_nonfinite_configuration_is_recorded_safely(self):
+        for name, value in (("nan", float("nan")), ("inf", float("inf"))):
+            with self.subTest(name=name):
+                run = self.contract.RunRecord.start(
+                    self.root / "runs",
+                    run_id=f"nonfinite-{name}",
+                    pipeline="classical_gmm",
+                    config={"gmm_reg_covar": value},
+                    inputs=self.inputs,
+                )
+                self.assertEqual(run.record["config"]["gmm_reg_covar"], name)
+                self.assertEqual(
+                    json.loads((run.path / "run.json").read_text())["status"],
+                    "running",
+                )
 
     def test_round_trip_and_prediction_only_metrics(self):
         run = self.complete()

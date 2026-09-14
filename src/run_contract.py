@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import re
@@ -105,6 +106,8 @@ def _config_value(key: str, value):
             if key in {"metadata_path", "images_dir", "split_manifest"}
             else value.name
         )
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     raise TypeError(f"unsupported config value for {key}")
@@ -130,6 +133,13 @@ def _failure_reason(error: BaseException) -> str:
         ("prediction", "invalid_predictions"),
         ("artifact", "invalid_artifact"),
         ("no finite checkpoint", "checkpoint_unavailable"),
+        ("gmm did not converge", "gmm_nonconvergence"),
+        ("logistic fit did not converge", "logistic_nonconvergence"),
+        ("max_components", "invalid_gmm_configuration"),
+        ("n_components", "invalid_gmm_configuration"),
+        ("reg_covar", "invalid_gmm_configuration"),
+        ("max_iter", "invalid_gmm_configuration"),
+        ("invalid gmm covariance_type", "invalid_gmm_configuration"),
     ):
         if message.startswith(prefix):
             return code
@@ -568,7 +578,7 @@ def recompute_metrics(run_dir: Path):
 def recompute_report(run_dir: Path):
     """Reproduce reported operating-point scores without cohort files."""
     record, predictions = validate_run(run_dir)
-    if record["pipeline"] == "classical_gmm":
+    if record["pipeline"].startswith("classical_"):
         summary_path = Path(run_dir) / "results" / "metrics_summary.json"
         points = {
             "cost_threshold": lambda p, c: c.prediction.to_numpy(),

@@ -1,14 +1,8 @@
 """
 Small script for the classical pipeline.
 
-1. Load HAM10000 images and convert to HSV colour space.
-2. Compute per-channel histograms (H, S, V) and concatenate into one feature vector.
-3. Load the frozen development allocation shared by all models.
-4. Fit a Gaussian mixture model per class (melanoma, benign) using EM.
-5. Select the number of components K by minimizing BIC on the training set.
-6. Compute class-conditional likelihoods and apply Bayes rule to get posteriors.
-7. Derive decision threshold from asymmetric cost matrix; compare with MAP threshold.
-8. Evaluate with ROC curve, confusion matrix, and reliability diagram.
+All models use the frozen development allocation and common run contract.
+The prevalence reference uses labels only; logistic and GMM use HSV histograms.
 """
 
 import argparse
@@ -21,6 +15,7 @@ import numpy as np
 import pandas as pd
 from src import (
     bayes,
+    classical,
     data,
     evaluation,
     features,
@@ -37,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     project_path = Path(__file__).parent
     dataset_path = project_path / "data" / "raw"
     parser = argparse.ArgumentParser(
-        description="Train the HSV histogram GMM baseline."
+        description="Train a prevalence, HSV logistic, or HSV GMM baseline."
     )
     parser.add_argument(
         "--metadata-path", type=Path, default=dataset_path / "metadata.csv"
@@ -50,6 +45,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs-dir", type=Path, default=project_path / "runs")
     parser.add_argument("--run-id", help="Unique run ID; generated when omitted.")
     parser.add_argument(
+        "--model", choices=("gmm", "prevalence", "logistic"), default="gmm"
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--gmm-max-components", type=int, default=10)
+    parser.add_argument(
+        "--gmm-covariance-type",
+        choices=("full", "tied", "diag", "spherical"),
+        default="full",
+    )
+    parser.add_argument("--gmm-reg-covar", type=float, default=1e-4)
+    parser.add_argument("--gmm-max-iter", type=int, default=300)
+    parser.add_argument(
         "--resume-from", help="Failed run ID to retry in a new directory."
     )
     return parser.parse_args()
@@ -57,11 +64,12 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
+    model_kind = getattr(args, "model", "gmm")
     run = run_contract.RunRecord.start(
         args.runs_dir,
         run_id=getattr(args, "run_id", None),
-        pipeline="classical_gmm",
-        config={**vars(args), "training_seed": 42},
+        pipeline=f"classical_{model_kind}",
+        config={**vars(args), "training_seed": getattr(args, "seed", 42)},
         inputs={
             "metadata": args.metadata_path,
             "split_manifest": args.split_manifest,
@@ -92,6 +100,7 @@ def main():
 
 
 def _run(args):
+    model_kind = getattr(args, "model", "gmm")
     METADATA_PATH = args.metadata_path
     IMAGES_DIR = args.images_dir
     RESULTS_PATH = args.results_dir
@@ -137,7 +146,7 @@ melanoma: {class_stats["melanoma"]}""")
     reporting.save_json(split_report, RESULTS_PATH / "split_summary.json")
     reporting.save_split_tables(split_report, RESULTS_PATH / "tables")
 
-    print("\n3. load images and make HSV histograms")
+    print("\n3. prepare model inputs")
 
     def load_and_extract_features(indices, desc=""):
         hsv_images = []
@@ -155,22 +164,39 @@ melanoma: {class_stats["melanoma"]}""")
 
         return X, valid_indices
 
-    X_train_raw, train_valid_idx = load_and_extract_features(
-        split_indices["train"], "Training set"
-    )
-    X_selection_raw, selection_valid_idx = load_and_extract_features(
-        split_indices["selection"], "Selection set"
-    )
-    X_development_raw, development_valid_idx = load_and_extract_features(
-        split_indices["development"], "Development holdout set"
-    )
-
-    # using train stats here, so selection/development dont leak into the scaling
-    X_train, train_mean, train_std = features.standardize_features(X_train_raw)
-    X_selection = features.apply_standardization(X_selection_raw, train_mean, train_std)
-    X_development = features.apply_standardization(
-        X_development_raw, train_mean, train_std
-    )
+    train_valid_idx = split_indices["train"]
+    selection_valid_idx = split_indices["selection"]
+    development_valid_idx = split_indices["development"]
+    train_mean = train_std = None
+    if model_kind != "prevalence":
+        X_train_raw, train_valid_idx = load_and_extract_features(
+            train_valid_idx, "Training set"
+        )
+        X_selection_raw, selection_valid_idx = load_and_extract_features(
+            selection_valid_idx, "Selection set"
+        )
+        X_development_raw, development_valid_idx = load_and_extract_features(
+            development_valid_idx, "Development holdout set"
+        )
+        if model_kind == "gmm":
+            # GMM scaling uses training statistics; logistic owns its train scaler.
+            X_train, train_mean, train_std = features.standardize_features(X_train_raw)
+            X_selection = features.apply_standardization(
+                X_selection_raw, train_mean, train_std
+            )
+            X_development = features.apply_standardization(
+                X_development_raw, train_mean, train_std
+            )
+        else:
+            X_train, X_selection, X_development = (
+                X_train_raw,
+                X_selection_raw,
+                X_development_raw,
+            )
+    else:
+        X_train = np.empty((len(train_valid_idx), 0))
+        X_selection = np.empty((len(selection_valid_idx), 0))
+        X_development = np.empty((len(development_valid_idx), 0))
 
     y_train = labels[train_valid_idx]
     y_selection = labels[selection_valid_idx]
@@ -183,34 +209,57 @@ train: {X_train.shape[0]} samples
 selection: {X_selection.shape[0]} samples
 development: {X_development.shape[0]} samples""")
 
-    print("\n4. fit GMMs and pick K with BIC")
-
-    models, selection_info = gmm.train_class_gmms_auto(
-        X_train, y_train, max_components=10, cv_type="full", random_state=42
-    )
-
-    gmm.print_gmm_summary(selection_info)
-
-    print("\n5. compute posterior probabilities")
-
-    log_likelihoods_train = gmm.compute_class_likelihoods(models, X_train)
+    print(f"\n4. fit {model_kind} baseline")
     class_priors = bayes.compute_class_priors(y_train)
-    posteriors_train = bayes.compute_posterior_probabilities(
-        log_likelihoods_train, class_priors
-    )
-    probs_train = bayes.get_melanoma_probability(posteriors_train)
+    selection_info = None
+    if model_kind == "prevalence":
+        fitted = classical.fit_prevalence(y_train)
+        probs_train = classical.predict_prevalence(fitted, len(y_train))
+        probs_selection = classical.predict_prevalence(fitted, len(y_selection))
+        probs_development = classical.predict_prevalence(fitted, len(y_development))
+    elif model_kind == "logistic":
+        fitted, selection_info = classical.fit_logistic(
+            X_train,
+            y_train,
+            X_selection,
+            y_selection,
+            seed=getattr(args, "seed", 42),
+        )
+        probs_train = classical.predict_logistic(fitted, X_train)
+        probs_selection = classical.predict_logistic(fitted, X_selection)
+        probs_development = classical.predict_logistic(fitted, X_development)
+    elif model_kind == "gmm":
+        fitted, selection_info = gmm.train_class_gmms_auto(
+            X_train,
+            y_train,
+            max_components=getattr(args, "gmm_max_components", 10),
+            cv_type=getattr(args, "gmm_covariance_type", "full"),
+            random_state=getattr(args, "seed", 42),
+            reg_covar=getattr(args, "gmm_reg_covar", 1e-4),
+            max_iter=getattr(args, "gmm_max_iter", 300),
+        )
+        gmm.print_gmm_summary(selection_info)
 
-    log_likelihoods_selection = gmm.compute_class_likelihoods(models, X_selection)
-    posteriors_selection = bayes.compute_posterior_probabilities(
-        log_likelihoods_selection, class_priors
-    )
-    probs_selection = bayes.get_melanoma_probability(posteriors_selection)
+        def posterior(x):
+            log_likelihoods = gmm.compute_class_likelihoods(fitted, x)
+            probabilities = bayes.compute_posterior_probabilities(
+                log_likelihoods, class_priors
+            )
+            return bayes.get_melanoma_probability(probabilities)
 
-    log_likelihoods_development = gmm.compute_class_likelihoods(models, X_development)
-    posteriors_development = bayes.compute_posterior_probabilities(
-        log_likelihoods_development, class_priors
-    )
-    probs_development = bayes.get_melanoma_probability(posteriors_development)
+        probs_train = posterior(X_train)
+        probs_selection = posterior(X_selection)
+        probs_development = posterior(X_development)
+    else:
+        raise ValueError("invalid classical model")
+
+    for probabilities in (probs_train, probs_selection, probs_development):
+        if not np.isfinite(probabilities).all() or np.any(
+            (probabilities < 0) | (probabilities > 1)
+        ):
+            raise ValueError("invalid classical probabilities")
+
+    print("\n5. compute probabilities")
 
     print(f"""
 posterior probabilities computed
@@ -334,17 +383,23 @@ development: {ece_development:.4f}""")
     )
 
     metrics_summary = {
-        "pipeline": "Classical Bayesian HSV + GMM skin lesion triage",
+        "pipeline": f"classical_{model_kind}",
         "task": "binary melanoma-vs-benign classification",
         "positive_class": "melanoma",
         "feature_representation": {
-            "name": "HSV per-channel histograms",
-            "h_bins": 64,
-            "s_bins": 32,
-            "v_bins": 32,
+            "name": (
+                "training prevalence"
+                if model_kind == "prevalence"
+                else "HSV per-channel histograms"
+            ),
+            "h_bins": 0 if model_kind == "prevalence" else 64,
+            "s_bins": 0 if model_kind == "prevalence" else 32,
+            "v_bins": 0 if model_kind == "prevalence" else 32,
             "dimension": int(X_train.shape[1]),
-            "image_size": [256, 256],
-            "standardization": "train statistics only",
+            "image_size": None if model_kind == "prevalence" else [256, 256],
+            "standardization": (
+                "none" if model_kind == "prevalence" else "train statistics only"
+            ),
         },
         "split": split_report,
         "cost_matrix": {
@@ -359,15 +414,31 @@ development: {ece_development:.4f}""")
             "benign": float(class_priors[0]),
             "melanoma": float(class_priors[1]),
         },
-        "bic_selection": reporting.selection_summary(selection_info),
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
-        "notes": [
-            "GMM component counts are selected with BIC on the training set.",
-            "Selection and development features are standardized with training statistics only.",
-            "The shared manifest reserves distinct training, selection, calibration and development groups.",
-        ],
+        "notes": ["All model comparisons use the same frozen development manifest."],
     }
+    if model_kind == "gmm":
+        metrics_summary["bic_selection"] = reporting.selection_summary(selection_info)
+        metrics_summary["gmm_fit"] = {
+            ("benign" if label == 0 else "melanoma"): {
+                "requested_max_components": info["requested_max_components"],
+                "effective_max_components": info["effective_max_components"],
+                "converged": info["converged"],
+                "n_iter": info["n_iter"],
+                "reg_covar": info["reg_covar"],
+                "covariance_type": info["covariance_type"],
+                "max_iter": info["max_iter"],
+                "candidate_warnings": info["bic_info"]["initialization_warnings"],
+                "fit_warnings": info["fit_warnings"],
+            }
+            for label, info in selection_info.items()
+        }
+    elif model_kind == "logistic":
+        metrics_summary["model_selection"] = selection_info
+    else:
+        metrics_summary["training_prevalence"] = fitted["prevalence"]
+        metrics_summary["majority_class"] = fitted["majority_class"]
     reporting.save_json(metrics_summary, RESULTS_PATH / "metrics_summary.json")
 
     print("\n9. make plots")
@@ -417,15 +488,16 @@ development: {ece_development:.4f}""")
         save_path=str(RESULTS_PATH / "figures" / "calibration.png"),
     )
 
-    for class_label in [0, 1]:
-        info = selection_info[class_label]
-        class_name = "benign" if class_label == 0 else "melanoma"
-        plots.plot_bic_scores(
-            info["bic_info"]["component_range"],
-            info["bic_info"]["bic_scores"],
-            info["n_components"],
-            save_path=str(RESULTS_PATH / "figures" / f"bic_{class_name}.png"),
-        )
+    if model_kind == "gmm":
+        for class_label in (0, 1):
+            info = selection_info[class_label]
+            class_name = "benign" if class_label == 0 else "melanoma"
+            plots.plot_bic_scores(
+                info["bic_info"]["component_range"],
+                info["bic_info"]["bic_scores"],
+                info["n_components"],
+                save_path=str(RESULTS_PATH / "figures" / f"bic_{class_name}.png"),
+            )
 
     print("""
 plots generated and saved
@@ -448,7 +520,7 @@ plots generated and saved
                 "prediction_map": map_predictions,
                 "prob_melanoma": probabilities,
                 "score": np.where(predictions == 1, probabilities, 1 - probabilities),
-                "model_name": "Bayesian_GMM_HSV",
+                "model_name": f"classical_{model_kind}",
             }
         )
 
@@ -485,10 +557,12 @@ plots generated and saved
 11. save model""")
 
     model_info = {
+        "model_kind": model_kind,
         "split_hash": split_report["split_hash"],
         "cohort_hash": split_report["cohort_hash"],
         "protocol_version": split_report["protocol_version"],
-        "models": models,
+        "models": fitted if model_kind == "gmm" else None,
+        "fitted": fitted,
         "selection_info": selection_info,
         "train_mean": train_mean,
         "train_std": train_std,
@@ -499,10 +573,13 @@ plots generated and saved
         "cost_fp": COST_FP,
     }
 
-    with open(MODELS_PATH / "bayesian_gmm_model.pkl", "wb") as f:
+    model_filename = (
+        "bayesian_gmm_model.pkl" if model_kind == "gmm" else f"{model_kind}_model.pkl"
+    )
+    with open(MODELS_PATH / model_filename, "wb") as f:
         pickle.dump(model_info, f)
 
-    print(f"  Saved model to {MODELS_PATH / 'bayesian_gmm_model.pkl'}")
+    print(f"  Saved model to {MODELS_PATH / model_filename}")
 
     print(f"""
 done

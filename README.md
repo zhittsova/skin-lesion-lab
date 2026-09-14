@@ -47,6 +47,16 @@ uv run --locked python train_deep_pipeline.py \
   --architecture small_cnn --epochs 5
 ```
 
+The classical command defaults to HSV/GMM. Use `--model prevalence` for a
+training-prevalence reference or `--model logistic` for L2 logistic regression
+on HSV histograms. Logistic regression fits its scaler on training rows and
+chooses C from 0.01, 0.1, 1 and 10 by selection ROC-AUC, with smaller C
+breaking ties. GMM selects its component count by training BIC and records
+the covariance setting, regularization and convergence. Set `--seed` to
+17, 42 or 73 for the declared comparison runs. Each run reads the current
+image files and recomputes histograms; it does not reuse a feature cache.
+PCA and embedding variants are not part of these baseline runs.
+
 Data paths default to `data/raw/`. Each training command creates a new ignored
 directory under `runs/` with `run.json`, a manifest snapshot, checked predictions,
 and its results, model, and array files. Pass `--run-id` to name a run or let the
