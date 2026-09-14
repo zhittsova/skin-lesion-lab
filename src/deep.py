@@ -1,5 +1,6 @@
 """PyTorch helpers for the in-project deep learning baseline."""
 
+import random
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -83,6 +84,8 @@ class SmallDropoutCnn(nn.Module):
 
 def build_transforms(image_size: int, train: bool) -> transforms.Compose:
     """Build image transforms using ImageNet normalization for both models."""
+    if image_size < 32:
+        raise ValueError("image_size must be at least 32")
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
 
@@ -115,15 +118,23 @@ def build_model(
     freeze_backbone: bool = True,
 ) -> nn.Module:
     """Build one of the project-owned deep baselines."""
+    if not 0 <= dropout < 1:
+        raise ValueError("dropout must be in [0, 1)")
     if architecture == "small_cnn":
+        if pretrained or not freeze_backbone:
+            raise ValueError("small_cnn has no pretrained or backbone fine-tuning mode")
         return SmallDropoutCnn(dropout=dropout)
 
     if architecture == "efficientnet_b0":
-        weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None
+        if freeze_backbone and not pretrained:
+            raise ValueError(
+                "a frozen EfficientNet backbone requires pretrained weights"
+            )
+        weights = EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
         model = models.efficientnet_b0(weights=weights)
 
         if freeze_backbone:
-            for parameter in model.parameters():
+            for parameter in model.features.parameters():
                 parameter.requires_grad = False
 
         in_features = model.classifier[1].in_features
@@ -131,12 +142,21 @@ def build_model(
             nn.Dropout(p=dropout),
             nn.Linear(in_features, 1),
         )
+        model._frozen_backbone = freeze_backbone
         return model
 
     raise ValueError(f"Unknown architecture: {architecture}")
 
 
-def get_default_device() -> torch.device:
+def get_default_device(requested: str = "auto") -> torch.device:
+    if requested != "auto":
+        if requested == "cpu":
+            return torch.device("cpu")
+        if requested == "cuda" and torch.cuda.is_available():
+            return torch.device("cuda")
+        if requested == "mps" and torch.backends.mps.is_available():
+            return torch.device("mps")
+        raise ValueError(f"device unavailable or invalid: {requested}")
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -145,11 +165,42 @@ def get_default_device() -> torch.device:
 
 
 def set_seed(seed: int) -> None:
+    if not 0 <= seed <= 2**32 - 4:
+        raise ValueError("seed must be between 0 and 2**32 - 4")
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id: int) -> None:
+    """Seed NumPy and Python RNGs from PyTorch's DataLoader worker seed."""
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def set_training_mode(model: nn.Module) -> None:
+    """Train the classifier while keeping a frozen backbone's buffers fixed."""
+    model.train()
+    if getattr(model, "_frozen_backbone", False):
+        model.features.eval()
+
+
+def _validate_batch(images: torch.Tensor, labels: torch.Tensor) -> None:
+    if images.ndim != 4 or images.shape[1] != 3 or min(images.shape[2:]) < 32:
+        raise ValueError("images must be RGB tensors with at least 32 pixels per side")
+    if labels.ndim != 1 or labels.shape[0] != images.shape[0] or not labels.numel():
+        raise ValueError("labels must have one value per image")
+    if not torch.isfinite(images).all():
+        raise ValueError("images must be finite")
+    if not torch.isfinite(labels).all() or not torch.all((labels == 0) | (labels == 1)):
+        raise ValueError("labels must be finite binary values")
 
 
 def compute_pos_weight(labels: np.ndarray) -> float:
@@ -165,22 +216,32 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> float:
-    model.train()
-    losses = []
+    set_training_mode(model)
+    loss_total = 0.0
+    sample_count = 0
 
     for images, labels, _, _ in dataloader:
         images = images.to(device)
         labels = labels.to(device)
+        _validate_batch(images, labels)
 
         optimizer.zero_grad(set_to_none=True)
         logits = model(images).view(-1)
+        if logits.shape != labels.shape or not torch.isfinite(logits).all():
+            raise ValueError("invalid training logits shape or non-finite values")
         loss = criterion(logits, labels)
+        if loss.ndim != 0 or not torch.isfinite(loss):
+            raise ValueError("non-finite training loss or invalid loss shape")
         loss.backward()
         optimizer.step()
 
-        losses.append(float(loss.detach().cpu()))
+        batch_count = labels.numel()
+        loss_total += float(loss.detach().cpu()) * batch_count
+        sample_count += batch_count
 
-    return float(np.mean(losses)) if losses else 0.0
+    if not sample_count:
+        raise ValueError("empty training dataloader")
+    return loss_total / sample_count
 
 
 @torch.no_grad()
@@ -191,16 +252,26 @@ def evaluate_loss(
     device: torch.device,
 ) -> float:
     model.eval()
-    losses = []
+    loss_total = 0.0
+    sample_count = 0
 
     for images, labels, _, _ in dataloader:
         images = images.to(device)
         labels = labels.to(device)
+        _validate_batch(images, labels)
         logits = model(images).view(-1)
+        if logits.shape != labels.shape or not torch.isfinite(logits).all():
+            raise ValueError("invalid evaluation logits shape or non-finite values")
         loss = criterion(logits, labels)
-        losses.append(float(loss.detach().cpu()))
+        if loss.ndim != 0 or not torch.isfinite(loss):
+            raise ValueError("non-finite evaluation loss or invalid loss shape")
+        batch_count = labels.numel()
+        loss_total += float(loss.detach().cpu()) * batch_count
+        sample_count += batch_count
 
-    return float(np.mean(losses)) if losses else 0.0
+    if not sample_count:
+        raise ValueError("empty evaluation dataloader")
+    return loss_total / sample_count
 
 
 @torch.no_grad()

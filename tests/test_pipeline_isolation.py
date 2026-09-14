@@ -1,6 +1,7 @@
 """Exercise actual entry-point routing with synthetic fit and selection spies."""
 
 import argparse
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,7 +45,7 @@ class PipelineIsolationTests(unittest.TestCase):
             num_workers=0,
             dropout=0.3,
             pretrained=False,
-            fine_tune_backbone=True,
+            fine_tune_backbone=False,
             learning_rate=0.001,
             weight_decay=0.0001,
             cost_fn=10.0,
@@ -232,6 +233,79 @@ class PipelineIsolationTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "manifest"),
             ):
                 pipeline.main()
+
+    def test_deep_restores_earliest_best_checkpoint_before_calibration(self):
+        import train_deep_pipeline as pipeline
+
+        self.args.epochs = 3
+        model = torch.nn.Linear(1, 1)
+        epochs = []
+
+        def train(**kwargs):
+            epochs.append(len(epochs) + 1)
+            with torch.no_grad():
+                model.weight.fill_(epochs[-1])
+                model.bias.zero_()
+            return 0.5
+
+        def infer(**kwargs):
+            self.assertEqual(epochs, [1, 2, 3])
+            torch.testing.assert_close(model.weight, torch.ones_like(model.weight))
+            checkpoints = list(self.args.runs_dir.glob("*/models/*.pt"))
+            self.assertEqual(len(checkpoints), 1)
+            checkpoint = torch.load(checkpoints[0], weights_only=True)
+            self.assertEqual(checkpoint["epoch"], 1)
+            self.assertEqual(checkpoint["selection_auc"], 0.75)
+            raise RoutingComplete
+
+        with (
+            patch.object(pipeline, "parse_args", return_value=self.args),
+            patch.object(
+                pipeline.data,
+                "prepare_dataset",
+                return_value=(self.frame, self.ids, self.labels),
+            ),
+            patch.object(pipeline, "make_loader", return_value=Mock()),
+            patch.object(pipeline.deep, "build_model", return_value=model),
+            patch.object(pipeline.deep, "train_one_epoch", side_effect=train),
+            patch.object(pipeline.deep, "evaluate_loss", return_value=0.5),
+            patch.object(
+                pipeline.deep,
+                "predict_probabilities",
+                return_value={"label": [0, 1], "probability": [0.25, 0.75]},
+            ),
+            patch.object(
+                pipeline,
+                "metrics_for_threshold",
+                side_effect=[
+                    {"roc_auc": score, "recall": 0.5, "specificity": 0.5}
+                    for score in (0.75, 0.75, 0.5)
+                ],
+            ),
+            patch.object(pipeline.deep, "predict_with_mc_dropout", side_effect=infer),
+            self.assertRaises(RoutingComplete),
+        ):
+            pipeline.main()
+
+    def test_random_frozen_configuration_records_failure_before_reading_data(self):
+        import train_deep_pipeline as pipeline
+
+        self.args.architecture = "efficientnet_b0"
+        self.args.pretrained = False
+        self.args.fine_tune_backbone = False
+        with (
+            patch.object(pipeline, "parse_args", return_value=self.args),
+            patch.object(pipeline.data, "prepare_dataset") as prepare,
+            self.assertRaisesRegex(ValueError, "pretrained|frozen"),
+        ):
+            pipeline.main()
+        prepare.assert_not_called()
+        records = list(self.args.runs_dir.glob("*/run.json"))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text())
+        self.assertEqual(record["status"], "failed")
+        self.assertFalse(record["config"]["pretrained"])
+        self.assertFalse(record["config"]["fine_tune_backbone"])
 
     def test_deep_cannot_reuse_checkpoint_without_selection_this_run(self):
         import train_deep_pipeline as pipeline
