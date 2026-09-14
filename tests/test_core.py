@@ -24,9 +24,7 @@ class BayesianPipelineTests(unittest.TestCase):
         np.testing.assert_array_equal(preds, np.array([0, 1, 1]))
 
     def test_lesion_split_has_no_overlap(self):
-        lesion_ids = np.array(
-            [f"lesion_{i:03d}" for i in range(80) for _ in range(2)]
-        )
+        lesion_ids = np.array([f"lesion_{i:03d}" for i in range(80) for _ in range(2)])
         labels = np.array([0] * 120 + [1] * 40)
 
         split_indices = splitting.split_dataset(

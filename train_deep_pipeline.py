@@ -1,8 +1,4 @@
-"""Train the project's own deep baseline and run MC Dropout.
-
-This script intentionally does not depend on Finn's branch. It uses the same
-local metadata, binary labels, and lesion-safe split as the classical pipeline.
-"""
+"""Train a CNN baseline and estimate uncertainty with MC dropout."""
 
 from __future__ import annotations
 
@@ -35,12 +31,14 @@ PINK = {"base": "#F390CA", "dark": "#8A3A6F"}
 
 def parse_args() -> argparse.Namespace:
     project_path = Path(__file__).parent
-    dataset_path = project_path.parent / "ISIC-images"
+    dataset_path = project_path / "data" / "raw"
 
     parser = argparse.ArgumentParser(
         description="Train a project-owned deep skin-lesion baseline with MC Dropout."
     )
-    parser.add_argument("--metadata-path", type=Path, default=dataset_path / "metadata.csv")
+    parser.add_argument(
+        "--metadata-path", type=Path, default=dataset_path / "metadata.csv"
+    )
     parser.add_argument("--images-dir", type=Path, default=dataset_path)
     parser.add_argument("--results-dir", type=Path, default=project_path / "results")
     parser.add_argument("--runs-dir", type=Path, default=project_path / "runs")
@@ -116,7 +114,9 @@ def limit_indices(
 
     if remaining > 0:
         already_selected = (
-            np.concatenate(selected_parts) if selected_parts else np.array([], dtype=int)
+            np.concatenate(selected_parts)
+            if selected_parts
+            else np.array([], dtype=int)
         )
         pool = np.setdiff1d(indices, already_selected, assume_unique=False)
         if len(pool) > 0:
@@ -191,7 +191,9 @@ def save_deep_metrics_tables(
     tables_dir: Path,
     architecture: str,
 ) -> pd.DataFrame:
-    metrics_df = pd.DataFrame(reporting.build_metrics_rows(metrics_by_split, ece_by_split))
+    metrics_df = pd.DataFrame(
+        reporting.build_metrics_rows(metrics_by_split, ece_by_split)
+    )
     metrics_df.to_csv(tables_dir / f"{architecture}_metrics_summary.csv", index=False)
 
     threshold_columns = [
@@ -273,9 +275,7 @@ def build_uncertainty_frame(mc_result: dict, threshold: float) -> pd.DataFrame:
         }
     )
     frame["prediction"] = (frame["mean_prob_melanoma"] >= threshold).astype(int)
-    frame["near_threshold"] = (
-        np.abs(frame["mean_prob_melanoma"] - threshold) <= 0.05
-    )
+    frame["near_threshold"] = np.abs(frame["mean_prob_melanoma"] - threshold) <= 0.05
     return frame
 
 
@@ -535,10 +535,22 @@ def main() -> None:
         n_passes=args.mc_samples,
     )
 
-    np.save(args.runs_dir / f"{args.architecture}_val_mc_probabilities.npy", val_mc["all_probabilities"])
-    np.save(args.runs_dir / f"{args.architecture}_test_mc_probabilities.npy", test_mc["all_probabilities"])
-    np.save(args.runs_dir / f"{args.architecture}_test_probability.npy", test_mc["mean_probability"])
-    np.save(args.runs_dir / f"{args.architecture}_test_uncertainty.npy", test_mc["uncertainty"])
+    np.save(
+        args.runs_dir / f"{args.architecture}_val_mc_probabilities.npy",
+        val_mc["all_probabilities"],
+    )
+    np.save(
+        args.runs_dir / f"{args.architecture}_test_mc_probabilities.npy",
+        test_mc["all_probabilities"],
+    )
+    np.save(
+        args.runs_dir / f"{args.architecture}_test_probability.npy",
+        test_mc["mean_probability"],
+    )
+    np.save(
+        args.runs_dir / f"{args.architecture}_test_uncertainty.npy",
+        test_mc["uncertainty"],
+    )
     np.save(args.runs_dir / f"{args.architecture}_test_y_true.npy", test_mc["label"])
 
     print("\n5. threshold selection and evaluation")
@@ -578,7 +590,9 @@ def main() -> None:
             test_mc["label"], test_mc["mean_probability"]
         ),
     }
-    save_deep_metrics_tables(metrics_by_split, ece_by_split, tables_dir, args.architecture)
+    save_deep_metrics_tables(
+        metrics_by_split, ece_by_split, tables_dir, args.architecture
+    )
 
     print("\n6. saving predictions and plots")
     test_predictions = save_predictions(
@@ -618,7 +632,8 @@ def main() -> None:
     )
     plot_mean_vs_epistemic_uncertainty(
         test_predictions,
-        figures_dir / f"{args.architecture}_mc_dropout_mean_vs_epistemic_uncertainty.png",
+        figures_dir
+        / f"{args.architecture}_mc_dropout_mean_vs_epistemic_uncertainty.png",
         threshold=formula_threshold,
     )
 
@@ -663,9 +678,15 @@ def main() -> None:
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
         "mc_dropout_uncertainty": {
-            "test_mean_predictive_std": float(test_predictions["predictive_std"].mean()),
-            "test_median_predictive_std": float(test_predictions["predictive_std"].median()),
-            "test_p90_predictive_std": float(test_predictions["predictive_std"].quantile(0.9)),
+            "test_mean_predictive_std": float(
+                test_predictions["predictive_std"].mean()
+            ),
+            "test_median_predictive_std": float(
+                test_predictions["predictive_std"].median()
+            ),
+            "test_p90_predictive_std": float(
+                test_predictions["predictive_std"].quantile(0.9)
+            ),
             "test_mean_mutual_information": float(
                 test_predictions["mutual_information"].mean()
             ),
@@ -696,10 +717,16 @@ def main() -> None:
     test_predictions.to_csv(
         tables_dir / "deep_mc_dropout_uncertainty_test.csv", index=False
     )
-    val_predictions.to_csv(tables_dir / "deep_mc_dropout_uncertainty_val.csv", index=False)
+    val_predictions.to_csv(
+        tables_dir / "deep_mc_dropout_uncertainty_val.csv", index=False
+    )
 
-    print(f"saved summary: {args.results_dir / f'{args.architecture}_metrics_summary.json'}")
-    print(f"saved real MC probabilities: {args.runs_dir / f'{args.architecture}_test_mc_probabilities.npy'}")
+    print(
+        f"saved summary: {args.results_dir / f'{args.architecture}_metrics_summary.json'}"
+    )
+    print(
+        f"saved real MC probabilities: {args.runs_dir / f'{args.architecture}_test_mc_probabilities.npy'}"
+    )
     print(f"saved figures: {figures_dir}")
 
 

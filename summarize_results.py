@@ -1,5 +1,6 @@
 """Build report tables from existing pipeline outputs without rerunning images."""
 
+import argparse
 import pickle
 from pathlib import Path
 
@@ -20,12 +21,24 @@ def metrics_from_predictions(
 
 def main() -> None:
     project_path = Path(__file__).parent
-    dataset_path = project_path.parent / "ISIC-images"
-    metadata_path = dataset_path / "metadata.csv"
-    results_path = project_path / "results"
+    parser = argparse.ArgumentParser(description="Summarize a trusted local GMM run.")
+    parser.add_argument(
+        "--metadata-path", type=Path, default=project_path / "data/raw/metadata.csv"
+    )
+    parser.add_argument("--images-dir", type=Path, default=project_path / "data/raw")
+    parser.add_argument("--results-dir", type=Path, default=project_path / "results")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=project_path / "models/bayesian_gmm_model.pkl",
+    )
+    args = parser.parse_args()
+    dataset_path = args.images_dir
+    metadata_path = args.metadata_path
+    results_path = args.results_dir
     tables_path = results_path / "tables"
     figures_path = results_path / "figures"
-    model_path = project_path / "models" / "bayesian_gmm_model.pkl"
+    model_path = args.model_path
 
     with model_path.open("rb") as f:
         model_info = pickle.load(f)

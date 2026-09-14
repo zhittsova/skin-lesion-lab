@@ -138,9 +138,9 @@ def print_evaluation_summary(
     auc_text = "nan" if np.isnan(metrics["roc_auc"]) else f"{metrics['roc_auc']:.4f}"
     text = f"""
 {split_name} results
-confusion matrix: TP={metrics['tp']}, TN={metrics['tn']}, FP={metrics['fp']}, FN={metrics['fn']}
-accuracy={metrics['accuracy']:.4f}, precision={metrics['precision']:.4f}, recall/sens={metrics['recall']:.4f}
-specificity={metrics['specificity']:.4f}, f1={metrics['f1']:.4f}
-roc_auc={auc_text}, brier={metrics['brier_score']:.4f}
+confusion matrix: TP={metrics["tp"]}, TN={metrics["tn"]}, FP={metrics["fp"]}, FN={metrics["fn"]}
+accuracy={metrics["accuracy"]:.4f}, precision={metrics["precision"]:.4f}, recall/sens={metrics["recall"]:.4f}
+specificity={metrics["specificity"]:.4f}, f1={metrics["f1"]:.4f}
+roc_auc={auc_text}, brier={metrics["brier_score"]:.4f}
 """
     print(text)

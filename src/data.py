@@ -67,7 +67,8 @@ def get_multiclass_codes(df: pd.DataFrame) -> np.ndarray:
             continue
 
         text = " ".join(
-            str(row.get(col, "")) for col in ["diagnosis_1", "diagnosis_2", "diagnosis_3"]
+            str(row.get(col, ""))
+            for col in ["diagnosis_1", "diagnosis_2", "diagnosis_3"]
         ).lower()
 
         if "melanoma" in text:

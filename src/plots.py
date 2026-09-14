@@ -355,7 +355,9 @@ def plot_threshold_comparison(
     fig, ax = plt.subplots(figsize=(10, 6))
     for i, point_name in enumerate(point_names):
         offset = (i - (len(point_names) - 1) / 2) * width
-        values = [float(metrics_by_point[point_name][metric]) for metric in metric_names]
+        values = [
+            float(metrics_by_point[point_name][metric]) for metric in metric_names
+        ]
         bars = ax.bar(x + offset, values, width, label=point_name)
         for bar, value in zip(bars, values):
             ax.text(

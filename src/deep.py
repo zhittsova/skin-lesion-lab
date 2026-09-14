@@ -230,7 +230,13 @@ def predict_probabilities(model: nn.Module, dataloader, device: torch.device) ->
 
 
 def set_dropout_layers_to_train(model: nn.Module) -> None:
-    dropout_types = (nn.Dropout, nn.Dropout1d, nn.Dropout2d, nn.Dropout3d, nn.AlphaDropout)
+    dropout_types = (
+        nn.Dropout,
+        nn.Dropout1d,
+        nn.Dropout2d,
+        nn.Dropout3d,
+        nn.AlphaDropout,
+    )
     for module in model.modules():
         if isinstance(module, dropout_types):
             module.train()

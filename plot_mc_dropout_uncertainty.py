@@ -22,7 +22,7 @@ import pandas as pd
 import seaborn as sns
 from src.uncertainty import summarize_mc_dropout_probabilities
 
-OUT_DIR = Path(__file__).parent.parent / "outputs"
+OUT_DIR = Path(__file__).parent / "outputs"
 PROJECT_FIGURES_DIR = Path(__file__).parent / "results" / "figures"
 
 TOKENS = {
@@ -132,7 +132,9 @@ def build_uncertainty_frame(
     return frame
 
 
-def plot_distribution(frame: pd.DataFrame, output_path: Path, illustrative: bool) -> None:
+def plot_distribution(
+    frame: pd.DataFrame, output_path: Path, illustrative: bool
+) -> None:
     sns.set_theme(style="whitegrid")
     plt.rcParams.update(
         {

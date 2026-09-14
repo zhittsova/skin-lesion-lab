@@ -72,7 +72,9 @@ def save_metrics_tables(
     return metrics_df
 
 
-def selection_summary(selection_info: Mapping[int, Mapping[str, Any]]) -> dict[str, Any]:
+def selection_summary(
+    selection_info: Mapping[int, Mapping[str, Any]],
+) -> dict[str, Any]:
     summary = {}
     for class_label, info in selection_info.items():
         class_name = str(info["class_name"]).lower()
@@ -86,7 +88,9 @@ def selection_summary(selection_info: Mapping[int, Mapping[str, Any]]) -> dict[s
     return summary
 
 
-def save_split_tables(split_report: Mapping[str, Any], tables_path: Path) -> pd.DataFrame:
+def save_split_tables(
+    split_report: Mapping[str, Any], tables_path: Path
+) -> pd.DataFrame:
     rows = []
     for split_name, split_stats in split_report["splits"].items():
         row = {"split": split_name}

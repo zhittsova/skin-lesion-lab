@@ -11,6 +11,7 @@ Small script for the classical pipeline.
 8. Evaluate with ROC curve, confusion matrix, and reliability diagram.
 """
 
+import argparse
 import pickle
 from pathlib import Path
 
@@ -20,14 +21,27 @@ from src import bayes, data, evaluation, features, gmm, plots, reporting, splitt
 from tqdm import tqdm
 
 
-def main():
-    DATASET_PATH = Path(__file__).parent.parent / "ISIC-images"
-    METADATA_PATH = DATASET_PATH / "metadata.csv"
-    IMAGES_DIR = DATASET_PATH
+def parse_args() -> argparse.Namespace:
+    project_path = Path(__file__).parent
+    dataset_path = project_path / "data" / "raw"
+    parser = argparse.ArgumentParser(
+        description="Train the HSV histogram GMM baseline."
+    )
+    parser.add_argument(
+        "--metadata-path", type=Path, default=dataset_path / "metadata.csv"
+    )
+    parser.add_argument("--images-dir", type=Path, default=dataset_path)
+    parser.add_argument("--results-dir", type=Path, default=project_path / "results")
+    parser.add_argument("--models-dir", type=Path, default=project_path / "models")
+    return parser.parse_args()
 
-    PROJECT_PATH = Path(__file__).parent
-    RESULTS_PATH = PROJECT_PATH / "results"
-    MODELS_PATH = PROJECT_PATH / "models"
+
+def main():
+    args = parse_args()
+    METADATA_PATH = args.metadata_path
+    IMAGES_DIR = args.images_dir
+    RESULTS_PATH = args.results_dir
+    MODELS_PATH = args.models_dir
 
     (RESULTS_PATH / "figures").mkdir(parents=True, exist_ok=True)
     (RESULTS_PATH / "tables").mkdir(parents=True, exist_ok=True)
@@ -58,8 +72,8 @@ Bayesian melanoma classifier
     class_stats = data.get_class_statistics(labels)
     print(f"""
 dataset loaded: {len(image_ids)} images
-benign: {class_stats['benign']}
-melanoma: {class_stats['melanoma']}""")
+benign: {class_stats["benign"]}
+melanoma: {class_stats["melanoma"]}""")
 
     plots.plot_class_distribution(
         labels, save_path=str(RESULTS_PATH / "figures" / "class_distribution.png")
@@ -227,8 +241,8 @@ class priors: P(benign)={class_priors[0]:.4f}, P(melanoma)={class_priors[1]:.4f}
     def print_threshold_comparison(split_name, cost_metrics, map_metrics):
         msg = f"""
 {split_name} threshold compare
-cost threshold {cost_threshold:.4f}: recall={cost_metrics['recall']:.3f}, specificity={cost_metrics['specificity']:.3f}, FP={cost_metrics['fp']}, FN={cost_metrics['fn']}
-MAP threshold  {map_threshold:.4f}: recall={map_metrics['recall']:.3f}, specificity={map_metrics['specificity']:.3f}, FP={map_metrics['fp']}, FN={map_metrics['fn']}
+cost threshold {cost_threshold:.4f}: recall={cost_metrics["recall"]:.3f}, specificity={cost_metrics["specificity"]:.3f}, FP={cost_metrics["fp"]}, FN={cost_metrics["fn"]}
+MAP threshold  {map_threshold:.4f}: recall={map_metrics["recall"]:.3f}, specificity={map_metrics["specificity"]:.3f}, FP={map_metrics["fp"]}, FN={map_metrics["fn"]}
 """
         print(msg)
 
@@ -254,7 +268,9 @@ test: {ece_test:.4f}""")
         "test": {"cost_threshold": metrics_test, "map_threshold": metrics_test_map},
     }
     ece_by_split = {"train": ece_train, "val": ece_val, "test": ece_test}
-    reporting.save_metrics_tables(metrics_by_split, ece_by_split, RESULTS_PATH / "tables")
+    reporting.save_metrics_tables(
+        metrics_by_split, ece_by_split, RESULTS_PATH / "tables"
+    )
 
     metrics_summary = {
         "pipeline": "Classical Bayesian HSV + GMM skin lesion triage",
