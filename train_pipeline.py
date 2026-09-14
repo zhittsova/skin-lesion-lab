@@ -12,12 +12,24 @@ Small script for the classical pipeline.
 """
 
 import argparse
+import copy
+import json
 import pickle
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from src import bayes, data, evaluation, features, gmm, plots, reporting, splitting
+from src import (
+    bayes,
+    data,
+    evaluation,
+    features,
+    gmm,
+    plots,
+    reporting,
+    run_contract,
+    splitting,
+)
 from tqdm import tqdm
 
 
@@ -35,13 +47,51 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--images-dir", type=Path, default=dataset_path)
-    parser.add_argument("--results-dir", type=Path, default=project_path / "results")
-    parser.add_argument("--models-dir", type=Path, default=project_path / "models")
+    parser.add_argument("--runs-dir", type=Path, default=project_path / "runs")
+    parser.add_argument("--run-id", help="Unique run ID; generated when omitted.")
+    parser.add_argument(
+        "--resume-from", help="Failed run ID to retry in a new directory."
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    run = run_contract.RunRecord.start(
+        args.runs_dir,
+        run_id=getattr(args, "run_id", None),
+        pipeline="classical_gmm",
+        config={**vars(args), "training_seed": 42},
+        inputs={
+            "metadata": args.metadata_path,
+            "split_manifest": args.split_manifest,
+            "dependency_lock": Path(__file__).with_name("uv.lock"),
+        },
+        resume_from=getattr(args, "resume_from", None),
+    )
+    local = copy.copy(args)
+    local.results_dir = run.path / "results"
+    local.models_dir = run.path / "models"
+    stage = "training"
+    try:
+        _run(local)
+        run.record["environment"]["device"] = "cpu"
+        stage = "finalize"
+        manifest = json.loads(args.split_manifest.read_text())
+        run.finish(
+            manifest,
+            {
+                role: local.results_dir / "tables" / f"predictions_{role}.csv"
+                for role in ("train", "selection", "development")
+            },
+        )
+    except BaseException as error:
+        run.fail(error, stage=stage)
+        raise
+    print(f"completed run: {run.path}")
+
+
+def _run(args):
     METADATA_PATH = args.metadata_path
     IMAGES_DIR = args.images_dir
     RESULTS_PATH = args.results_dir

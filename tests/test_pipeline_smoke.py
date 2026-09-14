@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from src import data, gmm, splitting
+from src import data, gmm, run_contract, splitting
 
 
 class SharedManifestSmokeTests(unittest.TestCase):
@@ -74,37 +75,35 @@ class SharedManifestSmokeTests(unittest.TestCase):
                     x, y, max_components=1, cv_type="diag", random_state=42
                 )
 
-            classical = root / "classical"
-            models = root / "classical_models"
+            classical_root = root / "classical_runs"
             with (
                 patch(
                     "sys.argv",
                     [
                         "train_pipeline.py",
                         *shared,
-                        "--results-dir",
-                        str(classical),
-                        "--models-dir",
-                        str(models),
+                        "--runs-dir",
+                        str(classical_root),
+                        "--run-id",
+                        "classical-fixture",
                     ],
                 ),
                 patch.object(train_pipeline, "plots", Mock()),
                 patch.object(gmm, "train_class_gmms_auto", side_effect=tiny_fit),
             ):
                 train_pipeline.main()
-            deep_results = root / "deep"
+            classical = classical_root / "classical-fixture"
+            deep_root = root / "deep_runs"
             with (
                 patch(
                     "sys.argv",
                     [
                         "train_deep_pipeline.py",
                         *shared,
-                        "--results-dir",
-                        str(deep_results),
-                        "--models-dir",
-                        str(root / "deep_models"),
                         "--runs-dir",
-                        str(root / "deep_runs"),
+                        str(deep_root),
+                        "--run-id",
+                        "deep-fixture",
                         "--epochs",
                         "1",
                         "--mc-samples",
@@ -127,39 +126,95 @@ class SharedManifestSmokeTests(unittest.TestCase):
                 patch.object(train_deep_pipeline, "plot_mean_vs_epistemic_uncertainty"),
             ):
                 train_deep_pipeline.main()
+            deep_results = deep_root / "deep-fixture"
             for location, filename in (
                 (classical, "predictions_development.csv"),
                 (deep_results, "small_cnn_predictions_development.csv"),
             ):
-                predictions = pd.read_csv(location / "tables" / filename)
+                predictions = pd.read_csv(location / "results" / "tables" / filename)
                 self.assertEqual(
                     predictions.image_id.tolist(), manifest["partitions"]["development"]
+                )
+                self.assertTrue(predictions.group_id.notna().all())
+                self.assertIn(
+                    "prediction_map" if location == classical else "predictive_std",
+                    predictions.columns,
                 )
             for location, filename in (
                 (classical, "metrics_summary.json"),
                 (deep_results, "small_cnn_metrics_summary.json"),
             ):
-                summary = json.loads((location / filename).read_text())
+                summary = json.loads((location / "results" / filename).read_text())
                 self.assertEqual(summary["split"]["split_hash"], manifest["split_hash"])
                 self.assertEqual(set(summary["split"]["splits"]), set(splitting.ROLES))
-            with (
-                patch(
-                    "sys.argv",
-                    [
-                        "summarize_results.py",
-                        *shared,
-                        "--results-dir",
-                        str(classical),
-                        "--model-path",
-                        str(models / "bayesian_gmm_model.pkl"),
-                    ],
-                ),
-                patch.object(summarize_results, "plots", Mock()),
+                self.assertNotIn(str(root), json.dumps(summary))
+            metadata.unlink()
+            shutil.rmtree(images)
+            with patch(
+                "sys.argv", ["summarize_results.py", "--run-dir", str(classical)]
             ):
                 summarize_results.main()
             self.assertEqual(
-                json.loads((classical / "metrics_summary.json").read_text())["split"][
-                    "split_hash"
-                ],
+                json.loads(
+                    (classical / "results" / "metrics_summary.json").read_text()
+                )["split"]["split_hash"],
                 manifest["split_hash"],
             )
+            for run in (classical, deep_results):
+                record, predictions = run_contract.validate_run(run)
+                self.assertEqual(record["status"], "completed")
+                self.assertEqual(record["split_hash"], manifest["split_hash"])
+                self.assertTrue(predictions.group_id.notna().all())
+                summary_file = (
+                    "metrics_summary.json"
+                    if run == classical
+                    else "small_cnn_metrics_summary.json"
+                )
+                reported = json.loads((run / "results" / summary_file).read_text())
+                recomputed = run_contract.recompute_report(run)
+                for role, points in recomputed["metrics"].items():
+                    for point, scores in points.items():
+                        for metric, value in scores.items():
+                            self.assertAlmostEqual(
+                                value, reported["metrics"][role][point][metric]
+                            )
+                    self.assertAlmostEqual(
+                        recomputed["expected_calibration_error"][role],
+                        reported["expected_calibration_error"][role],
+                        delta=1e-6,
+                    )
+                if run == deep_results:
+                    for metric, value in recomputed["mc_dropout_uncertainty"].items():
+                        self.assertAlmostEqual(
+                            value, reported["mc_dropout_uncertainty"][metric]
+                        )
+            producer = (
+                deep_results
+                / "results"
+                / "tables"
+                / "small_cnn_predictions_development.csv"
+            )
+            original = producer.read_bytes()
+            altered = pd.read_csv(producer)
+            altered.loc[0, "predictive_std"] += 0.2
+            altered.to_csv(producer, index=False)
+            record_path = deep_results / "run.json"
+            record = json.loads(record_path.read_text())
+            producer_key = "results/tables/small_cnn_predictions_development.csv"
+            record["artifacts"][producer_key] = run_contract.sha256(producer)
+            record_path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "deep uncertainty"):
+                run_contract.validate_run(deep_results)
+            producer.write_bytes(original)
+            record["artifacts"][producer_key] = run_contract.sha256(producer)
+            record_path.write_text(json.dumps(record))
+
+            array = deep_results / "arrays" / "small_cnn_development_y_true.npy"
+            changed = np.load(array, allow_pickle=False)
+            np.save(array, 1 - changed)
+            record["artifacts"]["arrays/small_cnn_development_y_true.npy"] = (
+                run_contract.sha256(array)
+            )
+            record_path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "deep array content"):
+                run_contract.validate_run(deep_results)

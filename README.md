@@ -47,11 +47,26 @@ uv run --locked python train_deep_pipeline.py \
   --architecture small_cnn --epochs 5
 ```
 
-Data paths default to `data/raw/`. Outputs go to ignored `results/`,
-`models/`, and `runs/` directories. Pretrained EfficientNet weights require
+Data paths default to `data/raw/`. Each training command creates a new ignored
+directory under `runs/` with `run.json`, a manifest snapshot, checked predictions,
+and its results, model, and array files. Pass `--run-id` to name a run or let the
+command generate one. An existing ID fails before training. A failed or interrupted
+run can be retried with a new ID and `--resume-from OLD_ID`; no files are reused.
+Validate and recompute scores from a completed run without the training images:
+
+```sh
+uv run --locked python summarize_results.py --run-dir runs/RUN_ID
+```
+
+`run.json` records the configuration, source state, input hashes, environment,
+runtime, status, and artifact checksums. Replaying a run requires the recorded
+source commit and any saved diff, matching metadata and image contents, the lockfile,
+the saved split manifest, and the same configuration and seed. The validator rejects
+changed or missing artifacts. [The run contract](docs/run-contract.md) describes
+the fields and validation rules. Pretrained EfficientNet weights require
 an explicit `--pretrained` option and download access. Use
 `--fine-tune-backbone` when training EfficientNet from scratch.
-Each pipeline writes `cohort_attrition.json` under its output directory. For
+Each pipeline writes `cohort_attrition.json` inside its run directory. For
 valid metadata, it records a reason for every row. Rows with unknown diagnoses,
 excluded cancers, or missing or corrupt images cannot enter the binary cohort.
 Invalid IDs, duplicate image content, and conflicting diagnosis fields stop preparation.
@@ -66,8 +81,8 @@ docker run --rm skin-lesion-lab:local
 ```
 
 The default command prints training options. For an experiment, mount data
-read-only at `/app/data/raw` and writable output directories at `/app/results`,
-`/app/models`, and `/app/runs`, then pass `python train_deep_pipeline.py ...`.
+read-only at `/app/data/raw` and a writable output directory at `/app/runs`,
+then pass `python train_deep_pipeline.py ...`.
 The runtime uses UID/GID 10001. GPU passthrough is not configured.
 Make host output directories writable by UID 10001 before mounting them.
 An accelerator installation needs a separate environment and PyTorch wheel
