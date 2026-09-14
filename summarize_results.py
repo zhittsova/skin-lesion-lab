@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument(
         "--metadata-path", type=Path, default=project_path / "data/raw/metadata.csv"
     )
+    parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--images-dir", type=Path, default=project_path / "data/raw")
     parser.add_argument(
         "--source", choices=["ham10000", "isic2018_task3"], required=True
@@ -49,10 +50,28 @@ def main() -> None:
     cost_fn = float(model_info["cost_fn"])
     cost_fp = float(model_info["cost_fp"])
 
+    df, _, labels = data.prepare_dataset(
+        str(metadata_path),
+        str(dataset_path),
+        source=args.source,
+        attrition_path=results_path / "cohort_attrition.json",
+    )
+    split_indices, split_report = splitting.load_development_split(
+        df, args.split_manifest
+    )
+    if model_info.get("split_hash") != split_report["split_hash"]:
+        raise ValueError("model split hash does not match manifest")
+
     metrics_by_split = {}
     ece_by_split = {}
-    for split_name in ["train", "val", "test"]:
+    for split_name in ["train", "selection", "development"]:
         pred_df = pd.read_csv(tables_path / f"predictions_{split_name}.csv")
+        expected = df.iloc[split_indices[split_name]]
+        if (
+            pred_df.image_id.tolist() != expected.isic_id.tolist()
+            or pred_df.target.tolist() != expected.target.tolist()
+        ):
+            raise ValueError("prediction membership or labels do not match manifest")
         cost_metrics = metrics_from_predictions(pred_df, "prediction", cost_fn, cost_fp)
         map_metrics = metrics_from_predictions(
             pred_df, "prediction_map", cost_fn, cost_fp
@@ -66,23 +85,6 @@ def main() -> None:
             pred_df["prob_melanoma"].to_numpy(),
         )
 
-    df, _, labels = data.prepare_dataset(
-        str(metadata_path),
-        str(dataset_path),
-        source=args.source,
-        attrition_path=results_path / "cohort_attrition.json",
-    )
-    lesion_ids = data.get_lesion_ids(df)
-    split_indices = splitting.split_dataset(
-        lesion_ids,
-        labels,
-        train_size=0.6,
-        val_size=0.2,
-        test_size=0.2,
-        random_state=42,
-    )
-    split_report = splitting.get_split_report(labels, split_indices, lesion_ids)
-
     reporting.save_json(split_report, results_path / "split_summary.json")
     reporting.save_split_tables(split_report, tables_path)
     reporting.save_metrics_tables(metrics_by_split, ece_by_split, tables_path)
@@ -90,8 +92,8 @@ def main() -> None:
     plots.set_style()
     plots.plot_threshold_comparison(
         {
-            "cost threshold": metrics_by_split["test"]["cost_threshold"],
-            "MAP threshold": metrics_by_split["test"]["map_threshold"],
+            "cost threshold": metrics_by_split["development"]["cost_threshold"],
+            "MAP threshold": metrics_by_split["development"]["map_threshold"],
         },
         save_path=str(figures_path / "threshold_comparison.png"),
     )
@@ -117,7 +119,7 @@ def main() -> None:
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
         "artifact_sources": {
-            "predictions": "results/tables/predictions_{train,val,test}.csv",
+            "predictions": "results/tables/predictions_{train,selection,development}.csv",
             "model": "models/bayesian_gmm_model.pkl",
         },
     }

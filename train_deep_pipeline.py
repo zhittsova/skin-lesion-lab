@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source", choices=["ham10000", "isic2018_task3"], required=True
     )
+    parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--images-dir", type=Path, default=dataset_path)
     parser.add_argument("--results-dir", type=Path, default=project_path / "results")
     parser.add_argument("--runs-dir", type=Path, default=project_path / "runs")
@@ -72,62 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--cost-fn", type=float, default=10.0)
     parser.add_argument("--cost-fp", type=float, default=1.0)
-    parser.add_argument(
-        "--max-train-images",
-        type=int,
-        default=None,
-        help="Optional stratified split limit for smoke runs.",
-    )
-    parser.add_argument(
-        "--max-val-images",
-        type=int,
-        default=None,
-        help="Optional stratified split limit for smoke runs.",
-    )
-    parser.add_argument(
-        "--max-test-images",
-        type=int,
-        default=None,
-        help="Optional stratified split limit for smoke runs.",
-    )
     return parser.parse_args()
-
-
-def limit_indices(
-    indices: np.ndarray,
-    labels: np.ndarray,
-    max_images: int | None,
-    seed: int,
-) -> np.ndarray:
-    if max_images is None or max_images >= len(indices):
-        return indices
-
-    rng = np.random.default_rng(seed)
-    selected_parts = []
-    remaining = max_images
-
-    for class_label in [0, 1]:
-        class_indices = indices[labels[indices] == class_label]
-        if len(class_indices) == 0:
-            continue
-        n_class = max(1, round(max_images * len(class_indices) / len(indices)))
-        n_class = min(n_class, len(class_indices), remaining)
-        remaining -= n_class
-        selected_parts.append(rng.choice(class_indices, size=n_class, replace=False))
-
-    if remaining > 0:
-        already_selected = (
-            np.concatenate(selected_parts)
-            if selected_parts
-            else np.array([], dtype=int)
-        )
-        pool = np.setdiff1d(indices, already_selected, assume_unique=False)
-        if len(pool) > 0:
-            selected_parts.append(
-                rng.choice(pool, size=min(remaining, len(pool)), replace=False)
-            )
-
-    return rng.permutation(np.concatenate(selected_parts))
 
 
 def make_loader(
@@ -300,12 +246,12 @@ def plot_uncertainty_distribution(frame: pd.DataFrame, output_path: Path) -> Non
     ax.axvline(median, color=TOKENS["ink"], linestyle=":", linewidth=1.2)
     ax.axvline(p90, color=ORANGE["mid"], linestyle="--", linewidth=1.3)
     ax.set_xlabel("Predictive uncertainty: std of MC P(melanoma)")
-    ax.set_ylabel("Test images")
+    ax.set_ylabel("Development holdout images")
     add_chart_header(
         fig,
         ax,
         "Distribution of predictive uncertainties (MC Dropout)",
-        f"Real test-set inference; median std={median:.3f}, 90th percentile={p90:.3f}.",
+        f"Real development-set inference; median std={median:.3f}, 90th percentile={p90:.3f}.",
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", facecolor=fig.get_facecolor())
@@ -347,7 +293,7 @@ def plot_mean_vs_epistemic_uncertainty(
     add_chart_header(
         fig,
         ax,
-        "MC Dropout epistemic uncertainty on the test set",
+        "MC Dropout epistemic uncertainty on the development set",
         "Each point is one image; uncertainty is higher when dropout passes disagree.",
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,6 +321,10 @@ def save_predictions(
 
 def main() -> None:
     args = parse_args()
+    if args.epochs <= 0:
+        raise ValueError(
+            "epochs must be positive; a checkpoint must be selected this run"
+        )
     start_time = time.time()
     deep.set_seed(args.seed)
 
@@ -395,24 +345,9 @@ def main() -> None:
     )
     lesion_ids = data.get_lesion_ids(df)
 
-    split_indices = splitting.split_dataset(
-        lesion_ids,
-        labels,
-        train_size=0.6,
-        val_size=0.2,
-        test_size=0.2,
-        random_state=args.seed,
+    split_indices, split_report = splitting.load_development_split(
+        df, args.split_manifest
     )
-    split_indices["train"] = limit_indices(
-        split_indices["train"], labels, args.max_train_images, args.seed
-    )
-    split_indices["val"] = limit_indices(
-        split_indices["val"], labels, args.max_val_images, args.seed + 1
-    )
-    split_indices["test"] = limit_indices(
-        split_indices["test"], labels, args.max_test_images, args.seed + 2
-    )
-    split_report = splitting.get_split_report(labels, split_indices, lesion_ids)
     splitting.print_split_summary(labels, split_indices, lesion_ids)
 
     print("\n2. building dataloaders")
@@ -426,20 +361,30 @@ def main() -> None:
         train=True,
         num_workers=args.num_workers,
     )
-    val_loader = make_loader(
+    selection_loader = make_loader(
         image_ids,
         labels,
-        split_indices["val"],
+        split_indices["selection"],
         args.images_dir,
         args.image_size,
         args.batch_size,
         train=False,
         num_workers=args.num_workers,
     )
-    test_loader = make_loader(
+    calibration_loader = make_loader(
         image_ids,
         labels,
-        split_indices["test"],
+        split_indices["calibration"],
+        args.images_dir,
+        args.image_size,
+        args.batch_size,
+        train=False,
+        num_workers=args.num_workers,
+    )
+    development_loader = make_loader(
+        image_ids,
+        labels,
+        split_indices["development"],
         args.images_dir,
         args.image_size,
         args.batch_size,
@@ -470,6 +415,7 @@ def main() -> None:
 
     history = []
     best_score = -float("inf")
+    checkpoint_selected = False
     best_checkpoint = args.models_dir / f"{args.architecture}_mc_dropout.pt"
 
     for epoch in range(1, args.epochs + 1):
@@ -480,107 +426,125 @@ def main() -> None:
             optimizer=optimizer,
             device=device,
         )
-        val_loss = deep.evaluate_loss(model, val_loader, criterion, device)
-        val_pred = deep.predict_probabilities(model, val_loader, device)
-        val_metrics = metrics_for_threshold(
-            val_pred["label"],
-            val_pred["probability"],
+        selection_loss = deep.evaluate_loss(model, selection_loader, criterion, device)
+        selection_pred = deep.predict_probabilities(model, selection_loader, device)
+        selection_metrics = metrics_for_threshold(
+            selection_pred["label"],
+            selection_pred["probability"],
             threshold=0.5,
             cost_fn=args.cost_fn,
             cost_fp=args.cost_fp,
         )
-        score = float(val_metrics["roc_auc"])
+        score = float(selection_metrics["roc_auc"])
         if np.isnan(score):
-            score = -val_loss
+            score = -selection_loss
 
         history_row = {
             "epoch": epoch,
             "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_auc": val_metrics["roc_auc"],
-            "val_recall_at_0_5": val_metrics["recall"],
-            "val_specificity_at_0_5": val_metrics["specificity"],
+            "selection_loss": selection_loss,
+            "selection_auc": selection_metrics["roc_auc"],
+            "selection_recall_at_0_5": selection_metrics["recall"],
+            "selection_specificity_at_0_5": selection_metrics["specificity"],
         }
         history.append(history_row)
         print(
             f"epoch {epoch:02d}/{args.epochs}: "
-            f"train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, "
-            f"val_auc={val_metrics['roc_auc']:.4f}"
+            f"train_loss={train_loss:.4f}, selection_loss={selection_loss:.4f}, "
+            f"selection_auc={selection_metrics['roc_auc']:.4f}"
         )
 
-        if score > best_score:
+        if np.isfinite(score) and score > best_score:
             best_score = score
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
+                    "split_hash": split_report["split_hash"],
+                    "cohort_hash": split_report["cohort_hash"],
                     "architecture": args.architecture,
                     "image_size": args.image_size,
                     "dropout": args.dropout,
                     "pretrained": args.pretrained,
                     "fine_tune_backbone": args.fine_tune_backbone,
                     "epoch": epoch,
-                    "val_auc": val_metrics["roc_auc"],
+                    "selection_auc": selection_metrics["roc_auc"],
                 },
                 best_checkpoint,
             )
+            checkpoint_selected = True
 
+    if not checkpoint_selected:
+        raise ValueError("no finite checkpoint selected this run")
     checkpoint = torch.load(best_checkpoint, map_location=device)
+    if any(
+        checkpoint.get(key) != split_report[key]
+        for key in ("split_hash", "cohort_hash")
+    ):
+        raise ValueError("checkpoint does not match the current split manifest")
     model.load_state_dict(checkpoint["model_state_dict"])
 
     print("\n4. MC Dropout inference")
-    val_mc = deep.predict_with_mc_dropout(
+    calibration_mc = deep.predict_with_mc_dropout(
         model=model,
-        dataloader=val_loader,
-        device=device,
-        n_passes=args.mc_samples,
-    )
-    test_mc = deep.predict_with_mc_dropout(
-        model=model,
-        dataloader=test_loader,
+        dataloader=calibration_loader,
         device=device,
         n_passes=args.mc_samples,
     )
 
     np.save(
-        args.runs_dir / f"{args.architecture}_val_mc_probabilities.npy",
-        val_mc["all_probabilities"],
+        args.runs_dir / f"{args.architecture}_calibration_mc_probabilities.npy",
+        calibration_mc["all_probabilities"],
     )
-    np.save(
-        args.runs_dir / f"{args.architecture}_test_mc_probabilities.npy",
-        test_mc["all_probabilities"],
-    )
-    np.save(
-        args.runs_dir / f"{args.architecture}_test_probability.npy",
-        test_mc["mean_probability"],
-    )
-    np.save(
-        args.runs_dir / f"{args.architecture}_test_uncertainty.npy",
-        test_mc["uncertainty"],
-    )
-    np.save(args.runs_dir / f"{args.architecture}_test_y_true.npy", test_mc["label"])
 
     print("\n5. threshold selection and evaluation")
     formula_threshold = args.cost_fp / (args.cost_fp + args.cost_fn)
     selected_threshold, threshold_sweep = find_best_threshold_by_validation_cost(
-        val_mc["label"],
-        val_mc["mean_probability"],
+        calibration_mc["label"],
+        calibration_mc["mean_probability"],
         cost_fn=args.cost_fn,
         cost_fp=args.cost_fp,
     )
     threshold_sweep.to_csv(
-        tables_dir / f"{args.architecture}_validation_threshold_sweep.csv",
+        tables_dir / f"{args.architecture}_calibration_threshold_sweep.csv",
         index=False,
     )
 
+    development_mc = deep.predict_with_mc_dropout(
+        model=model,
+        dataloader=development_loader,
+        device=device,
+        n_passes=args.mc_samples,
+    )
+
+    np.save(
+        args.runs_dir / f"{args.architecture}_development_mc_probabilities.npy",
+        development_mc["all_probabilities"],
+    )
+    np.save(
+        args.runs_dir / f"{args.architecture}_development_probability.npy",
+        development_mc["mean_probability"],
+    )
+    np.save(
+        args.runs_dir / f"{args.architecture}_development_uncertainty.npy",
+        development_mc["uncertainty"],
+    )
+    np.save(
+        args.runs_dir / f"{args.architecture}_development_y_true.npy",
+        development_mc["label"],
+    )
+
     metrics_by_split = {}
-    for split_name, mc_result in {"val": val_mc, "test": test_mc}.items():
+    for split_name, mc_result in {
+        "calibration": calibration_mc,
+        "development": development_mc,
+    }.items():
         y_true = mc_result["label"]
         y_prob = mc_result["mean_probability"]
         metrics_by_split[split_name] = {
             "cost_formula_threshold": metrics_for_threshold(
                 y_true, y_prob, formula_threshold, args.cost_fn, args.cost_fp
             ),
-            "validation_cost_threshold": metrics_for_threshold(
+            "calibration_cost_threshold": metrics_for_threshold(
                 y_true, y_prob, selected_threshold, args.cost_fn, args.cost_fp
             ),
             "map_threshold": metrics_for_threshold(
@@ -589,11 +553,11 @@ def main() -> None:
         }
 
     ece_by_split = {
-        "val": evaluation.compute_calibration_error(
-            val_mc["label"], val_mc["mean_probability"]
+        "calibration": evaluation.compute_calibration_error(
+            calibration_mc["label"], calibration_mc["mean_probability"]
         ),
-        "test": evaluation.compute_calibration_error(
-            test_mc["label"], test_mc["mean_probability"]
+        "development": evaluation.compute_calibration_error(
+            development_mc["label"], development_mc["mean_probability"]
         ),
     }
     save_deep_metrics_tables(
@@ -601,19 +565,19 @@ def main() -> None:
     )
 
     print("\n6. saving predictions and plots")
-    test_predictions = save_predictions(
-        test_mc,
+    development_predictions = save_predictions(
+        development_mc,
         threshold=selected_threshold,
-        output_path=tables_dir / f"{args.architecture}_predictions_test.csv",
+        output_path=tables_dir / f"{args.architecture}_predictions_development.csv",
     )
-    val_predictions = save_predictions(
-        val_mc,
+    calibration_predictions = save_predictions(
+        calibration_mc,
         threshold=selected_threshold,
-        output_path=tables_dir / f"{args.architecture}_predictions_val.csv",
+        output_path=tables_dir / f"{args.architecture}_predictions_calibration.csv",
     )
 
     fpr, tpr, auc_score = evaluation.compute_roc_curve(
-        test_mc["label"], test_mc["mean_probability"]
+        development_mc["label"], development_mc["mean_probability"]
     )
     plots.plot_roc_curve(
         fpr,
@@ -622,29 +586,29 @@ def main() -> None:
         save_path=str(figures_dir / f"{args.architecture}_roc_curve.png"),
         title=f"{args.architecture} ROC curve",
     )
-    cm_test = evaluation.compute_confusion_matrix(
-        test_mc["label"],
-        (test_mc["mean_probability"] >= selected_threshold).astype(int),
+    cm_development = evaluation.compute_confusion_matrix(
+        development_mc["label"],
+        (development_mc["mean_probability"] >= selected_threshold).astype(int),
     )
     plots.plot_confusion_matrix(
-        cm_test,
+        cm_development,
         save_path=str(figures_dir / f"{args.architecture}_confusion_matrix.png"),
         title=f"{args.architecture} confusion matrix",
     )
 
     plot_uncertainty_distribution(
-        test_predictions,
+        development_predictions,
         figures_dir / f"{args.architecture}_mc_dropout_uncertainty_distribution.png",
     )
     plot_mean_vs_epistemic_uncertainty(
-        test_predictions,
+        development_predictions,
         figures_dir
         / f"{args.architecture}_mc_dropout_mean_vs_epistemic_uncertainty.png",
         threshold=formula_threshold,
     )
 
     fpr_table, tpr_table, roc_thresholds = roc_curve(
-        test_mc["label"], test_mc["mean_probability"]
+        development_mc["label"], development_mc["mean_probability"]
     )
     pd.DataFrame(
         {
@@ -669,7 +633,7 @@ def main() -> None:
             "false_negative": args.cost_fn,
             "false_positive": args.cost_fp,
             "cost_formula_threshold": formula_threshold,
-            "selected_threshold_from_validation": selected_threshold,
+            "selected_threshold_from_calibration": selected_threshold,
             "map_threshold": 0.5,
         },
         "training": {
@@ -684,25 +648,25 @@ def main() -> None:
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
         "mc_dropout_uncertainty": {
-            "test_mean_predictive_std": float(
-                test_predictions["predictive_std"].mean()
+            "development_mean_predictive_std": float(
+                development_predictions["predictive_std"].mean()
             ),
-            "test_median_predictive_std": float(
-                test_predictions["predictive_std"].median()
+            "development_median_predictive_std": float(
+                development_predictions["predictive_std"].median()
             ),
-            "test_p90_predictive_std": float(
-                test_predictions["predictive_std"].quantile(0.9)
+            "development_p90_predictive_std": float(
+                development_predictions["predictive_std"].quantile(0.9)
             ),
-            "test_mean_mutual_information": float(
-                test_predictions["mutual_information"].mean()
+            "development_mean_mutual_information": float(
+                development_predictions["mutual_information"].mean()
             ),
         },
         "artifacts": {
-            "test_mc_probabilities": str(
-                args.runs_dir / f"{args.architecture}_test_mc_probabilities.npy"
+            "development_mc_probabilities": str(
+                args.runs_dir / f"{args.architecture}_development_mc_probabilities.npy"
             ),
-            "test_predictions": str(
-                tables_dir / f"{args.architecture}_predictions_test.csv"
+            "development_predictions": str(
+                tables_dir / f"{args.architecture}_predictions_development.csv"
             ),
             "uncertainty_distribution": str(
                 figures_dir
@@ -720,18 +684,18 @@ def main() -> None:
     )
 
     # Keep a clearly named copy for slide-building convenience.
-    test_predictions.to_csv(
-        tables_dir / "deep_mc_dropout_uncertainty_test.csv", index=False
+    development_predictions.to_csv(
+        tables_dir / "deep_mc_dropout_uncertainty_development.csv", index=False
     )
-    val_predictions.to_csv(
-        tables_dir / "deep_mc_dropout_uncertainty_val.csv", index=False
+    calibration_predictions.to_csv(
+        tables_dir / "deep_mc_dropout_uncertainty_calibration.csv", index=False
     )
 
     print(
         f"saved summary: {args.results_dir / f'{args.architecture}_metrics_summary.json'}"
     )
     print(
-        f"saved real MC probabilities: {args.runs_dir / f'{args.architecture}_test_mc_probabilities.npy'}"
+        f"saved real MC probabilities: {args.runs_dir / f'{args.architecture}_development_mc_probabilities.npy'}"
     )
     print(f"saved figures: {figures_dir}")
 

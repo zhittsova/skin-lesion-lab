@@ -9,6 +9,8 @@ from pathlib import Path
 import cv2
 import pandas as pd
 
+from src.splitting import LABEL_POLICY_VERSION, metadata_hash
+
 HAM_LABELS = {"mel": 1, "nv": 0, "bkl": 0, "df": 0, "vasc": 0}
 HAM_EXCLUDED = {"bcc", "scc"}
 ISIC_DIAGNOSES = {
@@ -207,6 +209,9 @@ def build_cohort(
                     "lesion_id": lesion_id,
                     "dx": code,
                     "target": target,
+                    "image_sha256": digest,
+                    "patient_id": _field(row.get("patient_id", "")),
+                    "duplicate_cluster_id": _field(row.get("duplicate_cluster_id", "")),
                 }
             )
     outcomes.sort(key=lambda item: item["image_id"])
@@ -218,4 +223,9 @@ def build_cohort(
         pd.DataFrame.from_records(records).sort_values("isic_id").reset_index(drop=True)
     )
     frame["target"] = frame["target"].astype("int64")
+    frame.attrs = {
+        "source": source,
+        "label_policy_version": LABEL_POLICY_VERSION,
+        "metadata_content_hash": metadata_hash(df),
+    }
     return CohortResult(frame=frame, outcomes=outcomes, counts=counts)
