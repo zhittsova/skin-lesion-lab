@@ -36,7 +36,7 @@
       "acquisition_population": "Historical pigmented-lesion samples in the HAM10000-associated ISIC 2018 training collection; not a general screening population.",
       "required_metadata_columns": ["isic_id", "lesion_id", "diagnosis_1", "diagnosis_2", "diagnosis_3"],
       "local_metadata_sha256": "12369fc74fb305384384f98d92d09c1ce96704003a5d95266cb762dc040ea242",
-      "local_match_basis": "The local export has 10,015 rows and 7,470 lesion IDs, matching the 2018 Task 3 collection. Its eight diagnosis hierarchy tuples map to the original seven HAM classes. Attribution and CC-BY-NC terms also match. No original download receipt, provider checksum, or full collection ID comparison was available."
+      "local_match_basis": "The local export has 10,015 rows and 7,470 lesion IDs, matching the 2018 Task 3 collection. It has eight diagnosis hierarchy tuples, including separate SCC and solar/actinic keratosis entries; the original HAM metadata uses seven dx groups. Attribution and CC-BY-NC terms also match. No original download receipt, provider checksum, or full collection ID comparison was available."
     }
   }
 }
