@@ -318,5 +318,17 @@ class RunContractTests(unittest.TestCase):
         self.assertEqual(failed["failure"]["reason"], "input_changed")
 
 
+class NumericGridConfigTests(unittest.TestCase):
+    def test_numeric_grid_keeps_values_and_records_invalid_floats(self):
+        from src.run_contract import _config_value
+
+        self.assertEqual(
+            _config_value("learning_rates", [0.001, 0.0003]), [0.001, 0.0003]
+        )
+        self.assertEqual(_config_value("learning_rates", [float("nan")]), ["nan"])
+        with self.assertRaises(TypeError):
+            _config_value("learning_rates", [{"private_path": "/tmp/data"}])
+
+
 if __name__ == "__main__":
     unittest.main()
