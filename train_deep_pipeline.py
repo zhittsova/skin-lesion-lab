@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -81,6 +82,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--learning-rates",
+        type=float,
+        nargs="+",
+        help="Learning-rate candidates searched within this model stratum.",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--mc-samples", type=int, default=30)
@@ -155,6 +162,14 @@ def validate_training_config(args) -> None:
         raise ValueError("dropout must be in [0, 1)")
     if not np.isfinite(args.learning_rate) or args.learning_rate <= 0:
         raise ValueError("learning_rate must be finite and positive")
+    learning_rates = getattr(args, "learning_rates", None)
+    if learning_rates is not None:
+        if not learning_rates or any(
+            not np.isfinite(rate) or rate <= 0 for rate in learning_rates
+        ):
+            raise ValueError("learning-rate candidates must be finite and positive")
+        if len(set(learning_rates)) != len(learning_rates):
+            raise ValueError("learning-rate candidates must be unique")
     if not np.isfinite(args.weight_decay) or args.weight_decay < 0:
         raise ValueError("weight_decay must be finite and nonnegative")
     if (
@@ -168,6 +183,27 @@ def validate_training_config(args) -> None:
         raise ValueError("invalid loss_strategy")
     if getattr(args, "device", "cpu") not in {"cpu", "auto", "cuda", "mps"}:
         raise ValueError("invalid device")
+
+
+def learning_rate_candidates(args) -> list[float]:
+    configured = getattr(args, "learning_rates", None)
+    return list(configured) if configured is not None else [args.learning_rate]
+
+
+def _learning_rate_token(rate: float) -> str:
+    return format(rate, ".17g").replace("-", "m").replace(".", "p").replace("+", "")
+
+
+def _candidate_checkpoint_path(args, rate: float, candidate_count: int) -> Path:
+    if candidate_count == 1:
+        return args.models_dir / f"{args.architecture}_mc_dropout.pt"
+    token = _learning_rate_token(rate)
+    return args.models_dir / f"{args.architecture}_lr_{token}_mc_dropout.pt"
+
+
+def _candidate_tie_rank(rate: float, configured_index: int) -> tuple[int, int]:
+    protocol_order = {0.001: 0, 0.0003: 1}
+    return protocol_order.get(rate, 2 + configured_index), configured_index
 
 
 def metrics_for_threshold(
@@ -459,29 +495,235 @@ def _run(args) -> None:
     )
     splitting.print_split_summary(labels, split_indices, lesion_ids)
 
-    print("\n2. building dataloaders")
-    train_loader = make_loader(
-        image_ids,
-        labels,
-        split_indices["train"],
-        args.images_dir,
-        args.image_size,
-        args.batch_size,
-        train=True,
-        num_workers=args.num_workers,
-        seed=args.seed,
+    print("\n2. preparing candidate search")
+    device = deep.get_default_device(getattr(args, "device", "cpu"))
+    print(f"device: {device}")
+    y_train = labels[split_indices["train"]]
+    loss_strategy = getattr(args, "loss_strategy", "unweighted")
+    if loss_strategy == "pos_weight":
+        if set(np.unique(y_train)) != {0, 1}:
+            raise ValueError("pos_weight needs both training classes")
+        pos_weight = deep.compute_pos_weight(y_train)
+        criterion = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([pos_weight], dtype=torch.float32, device=device)
+        )
+    else:
+        pos_weight = None
+        criterion = nn.BCEWithLogitsLoss()
+    candidate_rates = learning_rate_candidates(args)
+    search_path = args.results_dir / "deep_candidate_search.json"
+    candidate_records = [
+        {
+            "learning_rate": rate,
+            "status": "pending",
+            "history": [],
+            "checkpoint": None,
+            "epoch": None,
+            "selection_auc": None,
+            "runtime_seconds": None,
+        }
+        for rate in candidate_rates
+    ]
+    search_record = {
+        "metric": "selection_roc_auc",
+        "direction": "max",
+        "tie_break": {
+            "learning_rate": [0.001, 0.0003],
+            "checkpoint": "earliest_epoch",
+        },
+        "seed": args.seed,
+        "candidates": candidate_records,
+        "winner": None,
+    }
+    reporting.save_json(search_record, search_path)
+
+    print("\n3. training candidates")
+    for rate, candidate in zip(candidate_rates, candidate_records, strict=True):
+        candidate_start = time.time()
+        candidate["status"] = "running"
+        reporting.save_json(search_record, search_path)
+        checkpoint_path = _candidate_checkpoint_path(
+            args, rate, candidate_count=len(candidate_rates)
+        )
+        try:
+            deep.set_seed(args.seed)
+            train_loader = make_loader(
+                image_ids,
+                labels,
+                split_indices["train"],
+                args.images_dir,
+                args.image_size,
+                args.batch_size,
+                train=True,
+                num_workers=args.num_workers,
+                seed=args.seed,
+            )
+            selection_loader = make_loader(
+                image_ids,
+                labels,
+                split_indices["selection"],
+                args.images_dir,
+                args.image_size,
+                args.batch_size,
+                train=False,
+                num_workers=args.num_workers,
+                seed=args.seed + 1,
+            )
+            model = deep.build_model(
+                architecture=args.architecture,
+                dropout=args.dropout,
+                pretrained=args.pretrained,
+                freeze_backbone=not args.fine_tune_backbone,
+            ).to(device)
+            optimizer = torch.optim.AdamW(
+                (
+                    parameter
+                    for parameter in model.parameters()
+                    if parameter.requires_grad
+                ),
+                lr=rate,
+                weight_decay=args.weight_decay,
+            )
+            best_score = -float("inf")
+            checkpoint_selected = False
+            for epoch in range(1, args.epochs + 1):
+                train_loss = deep.train_one_epoch(
+                    model=model,
+                    dataloader=train_loader,
+                    criterion=criterion,
+                    optimizer=optimizer,
+                    device=device,
+                )
+                selection_loss = deep.evaluate_loss(
+                    model, selection_loader, criterion, device
+                )
+                selection_pred = deep.predict_probabilities(
+                    model, selection_loader, device
+                )
+                selection_metrics = metrics_for_threshold(
+                    selection_pred["label"],
+                    selection_pred["probability"],
+                    threshold=0.5,
+                    cost_fn=args.cost_fn,
+                    cost_fp=args.cost_fp,
+                )
+                if not np.isfinite(train_loss):
+                    raise ValueError("non-finite training loss")
+                if not np.isfinite(selection_loss):
+                    raise ValueError("non-finite checkpoint selection loss")
+                score = float(selection_metrics["roc_auc"])
+
+                history_row = {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "selection_loss": selection_loss,
+                    "selection_auc": selection_metrics["roc_auc"],
+                    "selection_recall_at_0_5": selection_metrics["recall"],
+                    "selection_specificity_at_0_5": selection_metrics["specificity"],
+                }
+                candidate["history"].append(history_row)
+                print(
+                    f"lr={rate:.8g} epoch {epoch:02d}/{args.epochs}: "
+                    f"train_loss={train_loss:.4f}, "
+                    f"selection_loss={selection_loss:.4f}, "
+                    f"selection_auc={selection_metrics['roc_auc']:.4f}"
+                )
+
+                if np.isfinite(score) and score > best_score:
+                    best_score = score
+                    torch.save(
+                        {
+                            "model_state_dict": model.state_dict(),
+                            "split_hash": split_report["split_hash"],
+                            "cohort_hash": split_report["cohort_hash"],
+                            "architecture": args.architecture,
+                            "image_size": args.image_size,
+                            "dropout": args.dropout,
+                            "pretrained": args.pretrained,
+                            "fine_tune_backbone": args.fine_tune_backbone,
+                            "weights_enum": (
+                                "EfficientNet_B0_Weights.IMAGENET1K_V1"
+                                if args.architecture == "efficientnet_b0"
+                                and args.pretrained
+                                else None
+                            ),
+                            "loss_strategy": loss_strategy,
+                            "pos_weight": pos_weight,
+                            "seed": args.seed,
+                            "learning_rate": rate,
+                            "epoch": epoch,
+                            "selection_auc": selection_metrics["roc_auc"],
+                        },
+                        checkpoint_path,
+                    )
+                    candidate["checkpoint"] = f"models/{checkpoint_path.name}"
+                    candidate["epoch"] = epoch
+                    candidate["selection_auc"] = score
+                    checkpoint_selected = True
+                reporting.save_json(search_record, search_path)
+
+            if not checkpoint_selected:
+                raise ValueError("no finite checkpoint selected this run")
+            candidate["status"] = "completed"
+            candidate["runtime_seconds"] = time.time() - candidate_start
+            reporting.save_json(search_record, search_path)
+        except BaseException as error:
+            candidate["status"] = "failed"
+            candidate["runtime_seconds"] = time.time() - candidate_start
+            candidate["failure"] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+            reporting.save_json(search_record, search_path)
+            raise
+
+    _, winner = min(
+        enumerate(candidate_records),
+        key=lambda item: (
+            -item[1]["selection_auc"],
+            *_candidate_tie_rank(item[1]["learning_rate"], item[0]),
+        ),
     )
-    selection_loader = make_loader(
-        image_ids,
-        labels,
-        split_indices["selection"],
-        args.images_dir,
-        args.image_size,
-        args.batch_size,
-        train=False,
-        num_workers=args.num_workers,
-        seed=args.seed + 1,
-    )
+    search_record["winner"] = {
+        "learning_rate": winner["learning_rate"],
+        "epoch": winner["epoch"],
+        "selection_auc": winner["selection_auc"],
+        "checkpoint": winner["checkpoint"],
+    }
+    reporting.save_json(search_record, search_path)
+
+    selected_candidate_checkpoint = args.models_dir / Path(winner["checkpoint"]).name
+    best_checkpoint = args.models_dir / f"{args.architecture}_mc_dropout.pt"
+    if selected_candidate_checkpoint != best_checkpoint:
+        shutil.copyfile(selected_candidate_checkpoint, best_checkpoint)
+    checkpoint = torch.load(best_checkpoint, map_location=device, weights_only=True)
+    if any(
+        checkpoint.get(key) != split_report[key]
+        for key in ("split_hash", "cohort_hash")
+    ):
+        raise ValueError("checkpoint does not match the current split manifest")
+    for key, expected in {
+        "architecture": args.architecture,
+        "image_size": args.image_size,
+        "dropout": args.dropout,
+        "pretrained": args.pretrained,
+        "fine_tune_backbone": args.fine_tune_backbone,
+        "loss_strategy": loss_strategy,
+        "pos_weight": pos_weight,
+        "seed": args.seed,
+        "learning_rate": winner["learning_rate"],
+    }.items():
+        if checkpoint.get(key) != expected:
+            raise ValueError(f"checkpoint configuration mismatch: {key}")
+    deep.set_seed(args.seed)
+    model = deep.build_model(
+        architecture=args.architecture,
+        dropout=args.dropout,
+        pretrained=args.pretrained,
+        freeze_backbone=not args.fine_tune_backbone,
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
     calibration_loader = make_loader(
         image_ids,
         labels,
@@ -504,126 +746,6 @@ def _run(args) -> None:
         num_workers=args.num_workers,
         seed=args.seed + 3,
     )
-
-    print("\n3. training")
-    device = deep.get_default_device(getattr(args, "device", "cpu"))
-    print(f"device: {device}")
-    model = deep.build_model(
-        architecture=args.architecture,
-        dropout=args.dropout,
-        pretrained=args.pretrained,
-        freeze_backbone=not args.fine_tune_backbone,
-    ).to(device)
-
-    y_train = labels[split_indices["train"]]
-    loss_strategy = getattr(args, "loss_strategy", "unweighted")
-    if loss_strategy == "pos_weight":
-        if set(np.unique(y_train)) != {0, 1}:
-            raise ValueError("pos_weight needs both training classes")
-        pos_weight = deep.compute_pos_weight(y_train)
-        criterion = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor([pos_weight], dtype=torch.float32, device=device)
-        )
-    else:
-        pos_weight = None
-        criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(
-        (parameter for parameter in model.parameters() if parameter.requires_grad),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-
-    history = []
-    best_score = -float("inf")
-    checkpoint_selected = False
-    best_checkpoint = args.models_dir / f"{args.architecture}_mc_dropout.pt"
-
-    for epoch in range(1, args.epochs + 1):
-        train_loss = deep.train_one_epoch(
-            model=model,
-            dataloader=train_loader,
-            criterion=criterion,
-            optimizer=optimizer,
-            device=device,
-        )
-        selection_loss = deep.evaluate_loss(model, selection_loader, criterion, device)
-        selection_pred = deep.predict_probabilities(model, selection_loader, device)
-        selection_metrics = metrics_for_threshold(
-            selection_pred["label"],
-            selection_pred["probability"],
-            threshold=0.5,
-            cost_fn=args.cost_fn,
-            cost_fp=args.cost_fp,
-        )
-        if not np.isfinite(train_loss):
-            raise ValueError("non-finite training loss")
-        if not np.isfinite(selection_loss):
-            raise ValueError("non-finite checkpoint selection loss")
-        score = float(selection_metrics["roc_auc"])
-
-        history_row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "selection_loss": selection_loss,
-            "selection_auc": selection_metrics["roc_auc"],
-            "selection_recall_at_0_5": selection_metrics["recall"],
-            "selection_specificity_at_0_5": selection_metrics["specificity"],
-        }
-        history.append(history_row)
-        print(
-            f"epoch {epoch:02d}/{args.epochs}: "
-            f"train_loss={train_loss:.4f}, selection_loss={selection_loss:.4f}, "
-            f"selection_auc={selection_metrics['roc_auc']:.4f}"
-        )
-
-        if np.isfinite(score) and score > best_score:
-            best_score = score
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "split_hash": split_report["split_hash"],
-                    "cohort_hash": split_report["cohort_hash"],
-                    "architecture": args.architecture,
-                    "image_size": args.image_size,
-                    "dropout": args.dropout,
-                    "pretrained": args.pretrained,
-                    "fine_tune_backbone": args.fine_tune_backbone,
-                    "weights_enum": (
-                        "EfficientNet_B0_Weights.IMAGENET1K_V1"
-                        if args.architecture == "efficientnet_b0" and args.pretrained
-                        else None
-                    ),
-                    "loss_strategy": loss_strategy,
-                    "pos_weight": pos_weight,
-                    "seed": args.seed,
-                    "epoch": epoch,
-                    "selection_auc": selection_metrics["roc_auc"],
-                },
-                best_checkpoint,
-            )
-            checkpoint_selected = True
-
-    if not checkpoint_selected:
-        raise ValueError("no finite checkpoint selected this run")
-    checkpoint = torch.load(best_checkpoint, map_location=device, weights_only=True)
-    if any(
-        checkpoint.get(key) != split_report[key]
-        for key in ("split_hash", "cohort_hash")
-    ):
-        raise ValueError("checkpoint does not match the current split manifest")
-    for key, expected in {
-        "architecture": args.architecture,
-        "image_size": args.image_size,
-        "dropout": args.dropout,
-        "pretrained": args.pretrained,
-        "fine_tune_backbone": args.fine_tune_backbone,
-        "loss_strategy": loss_strategy,
-        "pos_weight": pos_weight,
-        "seed": args.seed,
-    }.items():
-        if checkpoint.get(key) != expected:
-            raise ValueError(f"checkpoint configuration mismatch: {key}")
-    model.load_state_dict(checkpoint["model_state_dict"])
 
     if args.architecture == "small_cnn":
         mode = "small_cnn_from_scratch"
@@ -657,6 +779,9 @@ def _run(args) -> None:
         "randomness": {
             "seed": args.seed,
             "global_rngs": ["python", "numpy", "torch", "torch.cuda_if_available"],
+            "candidate_reinitialization": "global RNGs, model, optimizer, and loaders",
+            "inference_seed": args.seed,
+            "inference_seed_timing": "before winner model reconstruction and MC inference",
             "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
             "cudnn_deterministic": torch.backends.cudnn.deterministic,
             "cudnn_benchmark": torch.backends.cudnn.benchmark,
@@ -674,12 +799,16 @@ def _run(args) -> None:
             "metric": "selection_roc_auc",
             "direction": "max",
             "tie": "earliest_epoch",
+            "learning_rate_tie": [0.001, 0.0003],
+            "learning_rate": checkpoint["learning_rate"],
             "epoch": checkpoint["epoch"],
             "score": checkpoint["selection_auc"],
+            "candidate_search": "results/deep_candidate_search.json",
         },
         "checkpoint": {
             "path": f"models/{best_checkpoint.name}",
             "sha256": run_contract.sha256(best_checkpoint),
+            "learning_rate": checkpoint["learning_rate"],
             "reload_cpu_tolerance": {"atol": 1e-6, "rtol": 0},
         },
     }
@@ -895,10 +1024,12 @@ def _run(args) -> None:
         "training": {
             "epochs": args.epochs,
             "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
+            "learning_rate": checkpoint["learning_rate"],
+            "learning_rates": candidate_rates,
+            "candidate_search": "results/deep_candidate_search.json",
             "weight_decay": args.weight_decay,
             "pos_weight": pos_weight,
-            "history": history,
+            "history": winner["history"],
             "best_checkpoint": f"models/{best_checkpoint.name}",
         },
         "score_semantics": "calibration-fitted probability; uncertainty summarizes raw MC scores",
