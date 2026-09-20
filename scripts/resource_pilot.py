@@ -55,11 +55,24 @@ def sample(args):
     rng = np.random.default_rng(17)
     with tempfile.TemporaryDirectory(prefix="skin-lesion-pilot-") as tmp:
         images = Path(tmp)
-        ids = [f"generated-{i}" for i in range(args.batch_size * max(2, args.batches))]
+        unique_batches = args.dataset_batches or args.batches
+        ids = [
+            f"generated-{i}" for i in range(args.batch_size * max(2, unique_batches))
+        ]
+        unique_images = len(ids)
         for image_id in ids:
             Image.fromarray(rng.integers(0, 256, (450, 600, 3), dtype=np.uint8)).save(
                 images / f"{image_id}.jpg", quality=85
             )
+
+        # Reuse synthetic content while preserving MC's unique ID/path contract.
+        for index in range(len(ids), args.batch_size * args.batches):
+            name = f"generated-{index}"
+            os.link(
+                images / f"generated-{index % unique_images}.jpg",
+                images / f"{name}.jpg",
+            )
+            ids.append(name)
 
         def loader(batches, train):
             names = ids[: args.batch_size * batches]
@@ -94,6 +107,14 @@ def sample(args):
             torch.cuda.reset_peak_memory_stats(device)
         deep.train_one_epoch(model, loader(2, True), criterion, optimizer, device)
         synchronize()
+        if args.ready_file:
+            write_json(args.ready_file, {"pid": os.getpid(), "ready": True})
+            while not args.start_file.exists():
+                time.sleep(0.05)
+            start_at = json.loads(args.start_file.read_text())["start_unix_seconds"]
+            while time.time() < start_at:
+                time.sleep(min(0.02, max(0, start_at - time.time())))
+        workload_started = time.time()
         start = time.monotonic()
         loss = deep.train_one_epoch(
             model, loader(args.batches, True), criterion, optimizer, device
@@ -110,6 +131,7 @@ def sample(args):
         deep.predict_with_mc_dropout(model, loader(args.batches, False), device, 2)
         synchronize()
         mc_seconds = (time.monotonic() - start) / (2 * args.batches)
+        workload_finished = time.time()
         peak_device = 0
         if device.type == "cuda":
             peak_device = torch.cuda.max_memory_reserved(device)
@@ -143,6 +165,11 @@ def sample(args):
             args.output,
             {
                 "measurement": measured,
+                "workload_started_unix_seconds": workload_started,
+                "workload_finished_unix_seconds": workload_finished,
+                "timed_batches_per_phase": args.batches,
+                "unique_images": unique_images,
+                "image_paths": len(ids),
                 "timing": {
                     "train_batch_seconds": train_seconds,
                     "eval_batch_seconds": eval_seconds,
@@ -363,6 +390,9 @@ def main():
     child.add_argument("--batches", type=int, default=4)
     child.add_argument("--batch-size", type=int, default=64)
     child.add_argument("--image-size", type=int, default=128)
+    child.add_argument("--dataset-batches", type=int)
+    child.add_argument("--ready-file", type=Path)
+    child.add_argument("--start-file", type=Path)
     child.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "inventory":
@@ -379,6 +409,8 @@ def main():
             or args.threads < 1
             or args.batch_size < 1
             or args.image_size < 32
+            or (args.dataset_batches is not None and args.dataset_batches < 1)
+            or bool(args.ready_file) != bool(args.start_file)
         ):
             parser.error("invalid sample shape or worker/thread count")
         sample(args)

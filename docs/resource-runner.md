@@ -91,3 +91,31 @@ frozen experiment. Changing an existing run's backend, loader configuration or
 source requires a documented execution decision and compatible frozen plan.
 Preserve completed runs and the original plan. Never mix incompatible records
 to make an incomplete matrix appear complete.
+
+## Higher-concurrency pilot
+
+`configs/resources/colab-concurrency.json` requests one, two and three concurrent
+EfficientNet full-training processes on the first CUDA device. It explicitly
+allows three training threads to share a two-core host. Two repetitions run in
+opposite order. Each process warms up before a common start barrier, then times
+32 training batches, 32 evaluation batches and two inference passes. The report
+requires overlapping process intervals before comparing aggregate throughput.
+The repeated synthetic content has distinct sample IDs and file paths.
+
+```sh
+python scripts/concurrency_pilot.py \
+  --config configs/resources/colab-concurrency.json \
+  --output runs/concurrency-pilot
+```
+
+The controller caps the pilot at twenty minutes and checks host, GPU and disk
+headroom. It uses measured single-process memory allowances before launching
+larger groups, samples memory and GPU activity during execution, and stops the
+whole group on failure or timeout. Sampling can miss brief memory peaks; a
+sampled peak is not a reservation. Interrupted processes retain their logs.
+
+The result compares completed pilot workloads per second. Its mix of training
+and inference differs from a full benchmark job, so a measured speedup does not
+directly establish a full-run ETA. The fixed worker count and generated images
+also limit the conclusion. This experiment does not raise the production
+runner's one-job cap or authorize a full run. Review the measurements first.
