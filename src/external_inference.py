@@ -34,6 +34,11 @@ def validate_audit(path, digest, manifest_sha256):
     return audit
 
 
+def cache_dataset(dataset):
+    """Reuse deterministic evaluation tensors across MC passes."""
+    return [dataset[i] for i in range(len(dataset))]
+
+
 def predict_raw(run_dir, record, image_ids, images_dir, device):
     """Score images without accepting external labels as model inputs.
 
@@ -84,8 +89,10 @@ def predict_raw(run_dir, record, image_ids, images_dir, device):
         images_dir,
         transform=deep.build_transforms(config["image_size"], train=False),
     )
+    if len(dataset) * 3 * config["image_size"] ** 2 * 4 > 512 * 1024**2:
+        raise ValueError("external evaluation tensor cache exceeds 512 MiB")
     loader = DataLoader(
-        dataset,
+        cache_dataset(dataset),
         batch_size=config["batch_size"],
         shuffle=False,
         num_workers=0,

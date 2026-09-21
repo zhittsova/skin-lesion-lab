@@ -55,6 +55,9 @@ cap in the experiment controller and preserve failed attempts. The runner
 refuses an existing output directory. It records raw scores, predictions,
 calibration/referral summaries, actual software versions and source identity.
 External labels are supplied only to reporting; deep loaders use dummy labels.
+Deep inference caches the deterministic evaluation tensors once for all MC
+passes, with a 512 MiB tensor-size limit. The cache preserves image order and
+transforms; a synthetic check requires exact cached/uncached MC arrays.
 
 Use the same release, manifest, audit and output arguments with operation
 `report` after all six runs complete. The report checks each run's identity,

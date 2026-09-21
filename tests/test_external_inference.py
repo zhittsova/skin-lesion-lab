@@ -89,6 +89,17 @@ class ExternalInferenceTests(unittest.TestCase):
                     root,
                     "cpu",
                 )
+            with patch.object(
+                external_inference, "cache_dataset", side_effect=lambda dataset: dataset
+            ):
+                uncached = external_inference.predict_raw(
+                    root,
+                    {"pipeline": "deep_small_cnn", "config": config},
+                    ids,
+                    root,
+                    "cpu",
+                )
+            np.testing.assert_array_equal(first, uncached)
             self.assertEqual(logistic.shape, (2,))
             self.assertEqual(first.shape, (2, 2))
             np.testing.assert_array_equal(first, second)
