@@ -21,6 +21,12 @@ dependencies = [
 dev = [
     "ruff==0.15.20",
 ]
+notebooks = [
+    "ipykernel==6.30.1",
+    "jupyterlab==4.4.9",
+    "nbclient==0.10.2",
+    "nbformat==5.10.4",
+]
 
 [tool.ruff]
 line-length = 88
