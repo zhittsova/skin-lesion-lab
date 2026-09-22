@@ -44,6 +44,7 @@ IDENTITY_COLUMNS = (
     "image_id",
     "lesion_id",
     "group_id",
+    "cohort_sha256",
 )
 
 
@@ -66,7 +67,114 @@ def sha256(path: Path) -> str:
 
 
 def _json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+    return json.loads(
+        path.read_text(encoding="utf-8"),
+        parse_constant=_reject_constant,
+        object_pairs_hook=_unique_keys,
+    )
+
+
+def _unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"repeated JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def fitted_identity(record, training=None):
+    """Derive external mapping facts from the completed fit, not release labels."""
+    config = record["config"]
+    seed = config["seed"]
+    run_id = _check_id(record["run_id"])
+    if (
+        record.get("schema_version") != 1
+        or record.get("status") != "completed"
+        or type(seed) is not int
+        or seed < 0
+        or config.get("run_id") != run_id
+        or config.get("training_seed", seed) != seed
+        or splitting.canonical_hash(config) != record["config_sha256"]
+    ):
+        raise ValueError("invalid fitted run identity or config hash")
+    pipeline = record["pipeline"]
+    architecture = mode = None
+    loss, weight = "unweighted", 1.0
+    if pipeline in {"classical_logistic", "classical_gmm", "classical_prevalence"}:
+        family = pipeline.removeprefix("classical_")
+        if config.get("model") != family:
+            raise ValueError("fitted pipeline/model mismatch")
+    elif pipeline in {"deep_small_cnn", "deep_efficientnet_b0"}:
+        architecture = pipeline.removeprefix("deep_")
+        if (
+            config.get("architecture") != architecture
+            or type(config.get("fine_tune_backbone")) is not bool
+            or type(config.get("pretrained")) is not bool
+            or config.get("loss_strategy") not in {"unweighted", "pos_weight"}
+        ):
+            raise ValueError("invalid fitted architecture/mode/loss")
+        mode = "full" if config["fine_tune_backbone"] else "head"
+        if architecture == "small_cnn":
+            if config["pretrained"] or config["fine_tune_backbone"]:
+                raise ValueError("invalid small CNN training mode")
+            mode = "scratch"
+            training_mode = "small_cnn_from_scratch"
+        elif mode == "head":
+            if not config["pretrained"]:
+                raise ValueError("head training requires a pretrained backbone")
+            training_mode = "pretrained_head_training"
+        else:
+            training_mode = (
+                "pretrained_full_fine_tune"
+                if config["pretrained"]
+                else "random_full_training"
+            )
+        loss = config["loss_strategy"]
+        if (
+            not training
+            or training.get("architecture") != architecture
+            or training.get("mode") != training_mode
+            or training["randomness"]["seed"] != seed
+            or training["loss"]["strategy"] != loss
+        ):
+            raise ValueError("fitted training metadata identity mismatch")
+        weight = training["loss"]["pos_weight"]
+        if loss == "unweighted":
+            if weight is not None:
+                raise ValueError("unweighted fit declares a loss weight")
+            weight = 1.0
+        elif (
+            isinstance(weight, bool)
+            or not isinstance(weight, (int, float))
+            or not (math.isfinite(weight) and weight > 0)
+        ):
+            raise ValueError("invalid fitted positive loss weight")
+        family = (
+            f"{'cnn' if architecture == 'small_cnn' else 'efficientnet'}-{mode}-{loss}"
+        )
+    else:
+        raise ValueError("unsupported fitted pipeline")
+    version = config.get("decision_policy_version", 1)
+    if (
+        type(version) is not int
+        or version not in (1, 2)
+        or (version == 2 and pipeline != "classical_gmm")
+    ):
+        raise ValueError("unsupported fitted policy version")
+    return {
+        "run_id": run_id,
+        "family": family,
+        "seed": seed,
+        "pipeline": pipeline,
+        "architecture": architecture,
+        "pretrained": config["pretrained"] if architecture else None,
+        "mode": mode,
+        "loss_strategy": loss,
+        "positive_weight": weight,
+        "policy_version": version,
+        "config_sha256": record["config_sha256"],
+    }
 
 
 def _reject_constant(value):

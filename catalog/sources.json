@@ -19,7 +19,11 @@
       "label_provenance": "Histopathology for over half of lesions; the rest use follow-up, expert consensus, or confocal microscopy as described by the source paper.",
       "grouping_field": "lesion_id; no patient ID is inferred",
       "acquisition_population": "Historical pigmented-lesion samples from the Medical University of Vienna and a skin cancer office in Australia; not a general screening population.",
-      "required_metadata_columns": ["image_id", "lesion_id", "dx"],
+      "required_metadata_columns": [
+        "image_id",
+        "lesion_id",
+        "dx"
+      ],
       "local_metadata_sha256": null
     },
     "isic2018_task3": {
@@ -34,9 +38,33 @@
       "label_provenance": "Source metadata diagnosis hierarchy and confirmation type; confirmation methods differ across lesions.",
       "grouping_field": "lesion_id; the archive collection lists no patient IDs",
       "acquisition_population": "Historical pigmented-lesion samples in the HAM10000-associated ISIC 2018 training collection; not a general screening population.",
-      "required_metadata_columns": ["isic_id", "lesion_id", "diagnosis_1", "diagnosis_2", "diagnosis_3"],
+      "required_metadata_columns": [
+        "isic_id",
+        "lesion_id",
+        "diagnosis_1",
+        "diagnosis_2",
+        "diagnosis_3"
+      ],
       "local_metadata_sha256": "12369fc74fb305384384f98d92d09c1ce96704003a5d95266cb762dc040ea242",
       "local_match_basis": "The local export has 10,015 rows and 7,470 lesion IDs, matching the 2018 Task 3 collection. It has eight diagnosis hierarchy tuples, including separate SCC and solar/actinic keratosis entries; the original HAM metadata uses seven dx groups. Attribution and CC-BY-NC terms also match. No original download receipt, provider checksum, or full collection ID comparison was available."
+    },
+    "hiba_587329": {
+      "version": "Hospital Italiano de Buenos Aires Skin Lesions Images (2019-2022), DOI 10.34970/587329; 1616-image release",
+      "landing_page": "https://api.isic-archive.com/doi/hospital-italiano-de-buenos-aires-skin-lesions-images-2019-2022/",
+      "doi": "https://doi.org/10.34970/587329",
+      "data_descriptor": "https://doi.org/10.1038/s41597-023-02630-0",
+      "collection_id": 251,
+      "accessed_on": "2026-09-21",
+      "license": "CC-BY; checked per image in the pinned metadata",
+      "attribution": "Hospital Italiano de Buenos Aires",
+      "redistribution": "Attribute the institution and dataset DOI. This repository redistributes no source images or row-level metadata.",
+      "modality": "1270 contact-polarized dermoscopy images and 346 clinical photographs; the external adapter excludes clinical photographs",
+      "grouping_field": "Source-supplied patient_id and lesion_id, scoped to this cohort; they do not prove cross-cohort patient disjointness",
+      "acquisition_population": "Patients seen at Hospital Italiano de Buenos Aires, Argentina, during 2019-2022; selected retrospective cohort, predominantly light skin types",
+      "label_provenance": "Source diagnosis, confirmation type and diagnosis hierarchy; map diagnoses explicitly rather than using benign_malignant, which treats actinic keratosis as benign in the original study",
+      "local_metadata_sha256": "77060346ee2df2b691b455ad0a7060ae9ef8cdb513573de84b90ce4829cecce0",
+      "local_bundle_sha256": "771f929e1b8495fd4869f1cc7aa64970ab2096e6829ed7a4515046b8f6748143",
+      "external_claim_limit": "Distinct source institution and acquisition dates; independent-validation claims additionally require the recorded image-overlap audit, and cannot establish patient disjointness"
     }
   }
 }
