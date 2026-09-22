@@ -129,6 +129,10 @@ def _config_value(key: str, value):
         return str(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
+    if isinstance(value, (list, tuple)) and all(
+        isinstance(item, (int, float)) and not isinstance(item, bool) for item in value
+    ):
+        return [_config_value(key, item) for item in value]
     raise TypeError(f"unsupported config value for {key}")
 
 

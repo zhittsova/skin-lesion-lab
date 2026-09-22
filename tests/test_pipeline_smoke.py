@@ -127,6 +127,9 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         "8",
                         "--seed",
                         "73",
+                        "--learning-rates",
+                        "0.001",
+                        "0.0003",
                     ],
                 ),
                 patch.object(
@@ -143,6 +146,22 @@ class SharedManifestSmokeTests(unittest.TestCase):
             training = json.loads(
                 (deep_results / "results" / "deep_training_metadata.json").read_text()
             )
+            search = json.loads(
+                (deep_results / "results/deep_candidate_search.json").read_text()
+            )
+            self.assertEqual(
+                [c["learning_rate"] for c in search["candidates"]], [0.001, 0.0003]
+            )
+            self.assertTrue(
+                all(c["status"] == "completed" for c in search["candidates"])
+            )
+            winner = max(search["candidates"], key=lambda c: c["selection_auc"])
+            self.assertEqual(search["winner"]["learning_rate"], winner["learning_rate"])
+            self.assertEqual(
+                training["selection"]["learning_rate"], winner["learning_rate"]
+            )
+            record = json.loads((deep_results / "run.json").read_text())
+            self.assertEqual(record["config"]["learning_rates"], [0.001, 0.0003])
             checkpoint_path = deep_results / training["checkpoint"]["path"]
             checkpoint = torch.load(
                 checkpoint_path, map_location="cpu", weights_only=True
