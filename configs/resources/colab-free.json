@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "preferred_devices": [
+    "cuda:0"
+  ],
+  "wall_budget_seconds": 18000,
+  "pilot_budget_seconds": 900,
+  "paid_budget": 0,
+  "reserve_host_bytes": 2147483648,
+  "reserve_disk_bytes": 4294967296,
+  "reserve_device_bytes": 1073741824,
+  "max_concurrent_jobs": 1,
+  "threads_per_job": 1,
+  "loader_workers_candidates": [
+    0,
+    1,
+    2
+  ],
+  "measurement_max_age_seconds": 3600,
+  "as_of_unix_seconds": 0,
+  "jobs": {
+    "cnn": 6,
+    "efficientnet_head": 6,
+    "efficientnet_full": 6
+  }
+}

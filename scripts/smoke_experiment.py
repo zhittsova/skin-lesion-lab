@@ -124,13 +124,32 @@ def make_cohort(root: Path) -> tuple[Path, Path]:
     return metadata, images
 
 
-def check_run(root: Path, run_id: str, manifest: dict, *, deep: bool) -> dict:
+def check_run(
+    root: Path,
+    run_id: str,
+    manifest: dict,
+    *,
+    deep: bool,
+    requested_device: str | None = None,
+) -> dict:
     run_dir = root / "runs" / run_id
     record = json.loads((run_dir / "run.json").read_text())
     if record["status"] != "completed" or record["run_id"] != run_id:
         raise AssertionError(f"{run_id}: incomplete or wrong run record")
     if record["split_hash"] != manifest["split_hash"]:
         raise AssertionError(f"{run_id}: wrong split hash")
+    observed_device = None
+    if deep:
+        if requested_device not in {"cpu", "cuda"}:
+            raise ValueError("deep smoke verification requires cpu or cuda")
+        configured_device = record.get("config", {}).get("device")
+        observed_device = record.get("environment", {}).get("device")
+        if configured_device != requested_device or observed_device != requested_device:
+            raise AssertionError(
+                f"{run_id}: requested or observed backend differs: "
+                f"requested={requested_device}, configured={configured_device}, "
+                f"observed={observed_device}"
+            )
     summary_name = "small_cnn_metrics_summary.json" if deep else "metrics_summary.json"
     summary = json.loads((run_dir / "results" / summary_name).read_text())
     if summary.get("metrics_version") != 2:
@@ -196,10 +215,16 @@ def check_run(root: Path, run_id: str, manifest: dict, *, deep: bool) -> dict:
             first = model(tensor).cpu().numpy()
             second = model(tensor).cpu().numpy()
         np.testing.assert_allclose(first, second, rtol=1e-7, atol=1e-8)
-    return {"run_id": run_id, "metric_values_checked": checked, "roles": 4}
+    result = {"run_id": run_id, "metric_values_checked": checked, "roles": 4}
+    if deep:
+        result["requested_device"] = requested_device
+        result["observed_device"] = observed_device
+    return result
 
 
-def execute(root: Path) -> dict:
+def execute(root: Path, device="cpu") -> dict:
+    if not isinstance(device, str) or device not in {"cpu", "cuda"}:
+        raise ValueError("device must be cpu or cuda")
     metadata, images = make_cohort(root)
     manifest_path = root / "manifest.json"
     common = [
@@ -250,12 +275,18 @@ def execute(root: Path) -> dict:
             "--seed",
             "73",
             "--device",
-            "cpu",
+            device,
         ],
     )
     results = [
         check_run(root, "classical-smoke", manifest, deep=False),
-        check_run(root, "deep-smoke", manifest, deep=True),
+        check_run(
+            root,
+            "deep-smoke",
+            manifest,
+            deep=True,
+            requested_device=device,
+        ),
     ]
     for run_id in ("classical-smoke", "deep-smoke"):
         run_cli(
@@ -383,19 +414,25 @@ def execute(root: Path) -> dict:
         or recovered["status"] != "completed"
     ):
         raise AssertionError("failed-run recovery did not create a completed new run")
-    return {"split_hash": manifest["split_hash"], "runs": results, "failure_cases": 4}
+    return {
+        "split_hash": manifest["split_hash"],
+        "deep_backend": results[1]["observed_device"],
+        "runs": results,
+        "failure_cases": 4,
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=Path, help="Keep generated evidence here.")
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     args = parser.parse_args()
     if args.work_dir:
         args.work_dir.mkdir(parents=True, exist_ok=False)
-        result = execute(args.work_dir.resolve())
+        result = execute(args.work_dir.resolve(), device=args.device)
     else:
         with tempfile.TemporaryDirectory(prefix="skin-lesion-smoke-") as temporary:
-            result = execute(Path(temporary))
+            result = execute(Path(temporary), device=args.device)
     print(json.dumps(result, sort_keys=True))
 
 
