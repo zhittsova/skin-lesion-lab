@@ -234,7 +234,7 @@ class ReleaseFixture:
 
                 fitted = {
                     k: GaussianMixture(
-                        n_components=1, covariance_type="diag", random_state=seed
+                        n_components=1, covariance_type="diag", random_state=seed + k
                     ).fit(x[y == k])
                     for k in (0, 1)
                 }

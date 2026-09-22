@@ -646,3 +646,24 @@ class ExternalReleaseTests(unittest.TestCase):
         self.fixture.pin(str(rec_path.relative_to(self.root)))
         entry["run_sha256"] = digest(rec_path)
         self.reject_before_prediction()
+
+    def test_gmm_class_seed_offsets_cannot_be_relabelled(self):
+        import pickle
+
+        self.fixture.add_run("gmm", 17, policy_version=2)
+        entry = self.fixture.release["runs"]["gmm-17"]
+        path = self.root / entry["estimator"]
+        with path.open("rb") as handle:
+            saved = pickle.load(handle)
+        self.assertEqual([saved["fitted"][k].random_state for k in (0, 1)], [17, 18])
+        saved["fitted"][1].random_state = 17
+        with path.open("wb") as handle:
+            pickle.dump(saved, handle)
+        self.fixture.pin(entry["estimator"])
+        rec_path = self.root / entry["path"] / "run.json"
+        record = json.loads(rec_path.read_text())
+        record["artifacts"]["models/bayesian_gmm_model.pkl"] = digest(path)
+        write(rec_path, record)
+        self.fixture.pin(str(rec_path.relative_to(self.root)))
+        entry["run_sha256"] = digest(rec_path)
+        self.reject_before_prediction()

@@ -280,9 +280,9 @@ def check_estimator(root, entry, record, facts):
                 set(fitted) != {0, 1}
                 or any(
                     not isinstance(model, GaussianMixture)
-                    or model.random_state != facts["seed"]
+                    or model.random_state != facts["seed"] + label
                     or model.n_features_in_ != 128
-                    for model in fitted.values()
+                    for label, model in fitted.items()
                 )
                 or any(
                     np.asarray(saved[key]).shape != (128,)
