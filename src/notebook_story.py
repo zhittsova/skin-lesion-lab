@@ -37,6 +37,14 @@ def accepted_report(path):
 def summary_rows(report, metric):
     """Keep source run IDs alongside every displayed model estimate."""
     jobs = report["registry"]["jobs"]
+    if len(jobs) != len(report["models"]) * len(SEEDS) or {
+        job["stratum"] for job in jobs
+    } != set(report["models"]):
+        raise ValueError("registry jobs do not match the displayed model seeds")
+    if any(
+        not isinstance(job["run_id"], str) or not job["run_id"].strip() for job in jobs
+    ):
+        raise ValueError("registry contains an empty run ID")
     rows = []
     for model, metrics in report["models"].items():
         matches = [job for job in jobs if job["stratum"] == model]
@@ -86,7 +94,7 @@ def synthetic_demo():
     return {
         "kind": "illustrative synthetic data",
         "run_id": "synthetic-example-not-a-run",
-        "counts": {"images": len(frame), "groups": frame.group_id.nunique()},
+        "counts": {"records": len(frame), "groups": frame.group_id.nunique()},
         "ungrouped_roc_auc": naive["roc_auc"],
         "grouped_roc_auc": grouped["roc_auc"],
     }
