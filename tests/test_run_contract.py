@@ -45,8 +45,10 @@ class RunContractTests(unittest.TestCase):
             inputs=self.inputs,
         )
 
-    def complete(self, pipeline="classical_gmm"):
-        run = self.start(run_id=pipeline, pipeline=pipeline)
+    def complete(
+        self, pipeline="classical_gmm", *, run_id=None, probability_by_target=None
+    ):
+        run = self.start(run_id=run_id or pipeline, pipeline=pipeline)
         files = {}
         by_id = {row["image_id"]: row for row in self.manifest["rows"]}
         for role in ("train", "development"):
@@ -57,7 +59,10 @@ class RunContractTests(unittest.TestCase):
                 {
                     "image_id": ids,
                     "target": [by_id[i]["target"] for i in ids],
-                    "prob_melanoma": [0.8 if by_id[i]["target"] else 0.2 for i in ids],
+                    "prob_melanoma": [
+                        (probability_by_target or {0: 0.2, 1: 0.8})[by_id[i]["target"]]
+                        for i in ids
+                    ],
                     "prediction": [by_id[i]["target"] for i in ids],
                 }
             ).to_csv(path, index=False)
@@ -68,6 +73,32 @@ class RunContractTests(unittest.TestCase):
         )
         run.finish(self.manifest, files)
         return run
+
+    def test_saved_v1_summary_replay_is_explicit_and_new_metrics_are_null(self):
+        run = self.complete(probability_by_target={0: 0.1, 1: 0.2})
+        old = self.contract.recompute_report(run.path)
+        self.assertEqual(old["metrics_version"], 1)
+        self.assertEqual(old["metrics"]["development"]["map_threshold"]["precision"], 0)
+        record_path = run.path / "run.json"
+        record = json.loads(record_path.read_text())
+        summary_path = run.path / "results/metrics_summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["metrics_version"] = 2
+        summary_path.write_text(json.dumps(summary))
+        record["config"]["metrics_version"] = 2
+        record["config_sha256"] = splitting.canonical_hash(record["config"])
+        record["artifacts"]["results/metrics_summary.json"] = self.contract.sha256(
+            summary_path
+        )
+        record_path.write_text(json.dumps(record))
+        new = self.contract.recompute_report(run.path)
+        self.assertIsNone(new["metrics"]["development"]["map_threshold"]["precision"])
+        json.dumps(new, allow_nan=False)
+        record["config"]["metrics_version"] = 99
+        record["config_sha256"] = splitting.canonical_hash(record["config"])
+        record_path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "metrics version"):
+            self.contract.validate_run(run.path)
 
     def test_classical_comparators_recompute_cost_and_map_reports(self):
         for pipeline in ("classical_prevalence", "classical_logistic"):
@@ -132,6 +163,71 @@ class RunContractTests(unittest.TestCase):
             len(self.manifest["partitions"]["development"]),
         )
         self.assertNotIn(str(self.root), json.dumps(record))
+
+    def test_lexical_identifiers_survive_complete_run_and_reload(self):
+        frame = cohort(40)
+        replacements = {
+            "I0_000": "001",
+            "I0_001": "NA",
+            "I1_000": "000",
+            "I1_001": "NULL",
+        }
+        frame["isic_id"] = frame.isic_id.replace(replacements)
+        frame["lesion_id"] = frame.lesion_id.replace({"L0_000": "002", "L1_000": "NA"})
+        self.manifest = splitting.create_manifest(frame)
+        self.split.unlink()
+        splitting.save_manifest(self.manifest, self.split)
+        run = self.complete(
+            run_id="000",
+            probability_by_target={0: 0.12345678901234568, 1: 0.8765432109876543},
+        )
+        record, predictions = self.contract.validate_run(run.path)
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["run_id"], "000")
+        self.assertTrue(set(replacements.values()).issubset(set(predictions.image_id)))
+        self.assertTrue({"002", "NA"}.issubset(set(predictions.lesion_id)))
+        self.assertIn("001", set(predictions.group_id))
+        self.assertIsInstance(predictions.prob_melanoma.iloc[0], np.float64)
+        self.assertEqual(
+            predictions.loc[predictions.target == 0, "prob_melanoma"].iloc[0],
+            0.12345678901234568,
+        )
+        self.assertIn("development", self.contract.recompute_metrics(run.path))
+
+    def test_reader_keeps_na_like_text_and_rejects_bad_prediction_fields(self):
+        lexical = self.root / "lexical.csv"
+        pd.DataFrame(
+            {"image_id": ["000", "NA", "NULL", "N/A"], "prob_melanoma": [0.1] * 4}
+        ).to_csv(lexical, index=False)
+        read = self.contract._read_csv(lexical)
+        self.assertEqual(read.image_id.tolist(), ["000", "NA", "NULL", "N/A"])
+        self.assertTrue(pd.api.types.is_float_dtype(read.prob_melanoma))
+
+        ids = self.manifest["partitions"]["development"]
+        targets = {row["image_id"]: row["target"] for row in self.manifest["rows"]}
+        for case in ("missing_image_id", "malformed_probability"):
+            with self.subTest(case=case):
+                run = self.start(run_id=case)
+                raw = pd.DataFrame(
+                    {
+                        "image_id": ids,
+                        "target": [targets[image] for image in ids],
+                        "prob_melanoma": [0.5] * len(ids),
+                        "prediction": [targets[image] for image in ids],
+                    }
+                )
+                if case == "missing_image_id":
+                    raw = raw.drop(columns="image_id")
+                else:
+                    raw["prob_melanoma"] = raw["prob_melanoma"].astype(object)
+                    raw.loc[0, "prob_melanoma"] = "bad"
+                path = run.path / "raw.csv"
+                raw.to_csv(path, index=False)
+                with self.assertRaises(ValueError):
+                    run.finish(self.manifest, {"development": path})
+                self.assertEqual(
+                    json.loads((run.path / "run.json").read_text())["status"], "running"
+                )
 
     def test_duplicate_id_and_failed_run_cannot_validate(self):
         run = self.start()

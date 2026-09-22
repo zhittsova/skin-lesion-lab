@@ -49,6 +49,13 @@ def parse_args() -> argparse.Namespace:
         "--model", choices=("gmm", "prevalence", "logistic"), default="gmm"
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--decision-policy-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="V2 opts GMM into the future finite-log-odds calibration protocol.",
+    )
     parser.add_argument("--gmm-max-components", type=int, default=10)
     parser.add_argument(
         "--gmm-covariance-type",
@@ -66,6 +73,9 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     model_kind = getattr(args, "model", "gmm")
+    policy_version = getattr(args, "decision_policy_version", 1)
+    if policy_version not in (1, 2) or (policy_version == 2 and model_kind != "gmm"):
+        raise ValueError("policy v2 requires GMM finite log odds")
     run = run_contract.RunRecord.start(
         args.runs_dir,
         run_id=getattr(args, "run_id", None),
@@ -73,7 +83,8 @@ def main():
         config={
             **vars(args),
             "training_seed": getattr(args, "seed", 42),
-            "decision_policy_version": 1,
+            "decision_policy_version": policy_version,
+            "metrics_version": 2,
         },
         inputs={
             "metadata": args.metadata_path,
@@ -106,6 +117,9 @@ def main():
 
 def _run(args):
     model_kind = getattr(args, "model", "gmm")
+    policy_version = getattr(args, "decision_policy_version", 1)
+    if policy_version not in (1, 2) or (policy_version == 2 and model_kind != "gmm"):
+        raise ValueError("policy v2 requires GMM finite log odds")
     METADATA_PATH = args.metadata_path
     IMAGES_DIR = args.images_dir
     RESULTS_PATH = args.results_dir
@@ -256,6 +270,8 @@ development: {X_development.shape[0]} samples""")
 
         def posterior(x):
             log_likelihoods = gmm.compute_class_likelihoods(fitted, x)
+            if policy_version == 2:
+                return bayes.compute_posterior_log_odds(log_likelihoods, class_priors)
             probabilities = bayes.compute_posterior_probabilities(
                 log_likelihoods, class_priors
             )
@@ -267,11 +283,11 @@ development: {X_development.shape[0]} samples""")
     else:
         raise ValueError("invalid classical model")
 
-    for probabilities in (probs_train, probs_selection, probs_calibration):
-        if not np.isfinite(probabilities).all() or np.any(
-            (probabilities < 0) | (probabilities > 1)
-        ):
-            raise ValueError("invalid classical probabilities")
+    for scores in (probs_train, probs_selection, probs_calibration):
+        if policy_version == 2:
+            calibration.finite_scores(scores)
+        else:
+            calibration.probabilities(scores)
 
     policy = calibration.fit_policy(
         y_calibration,
@@ -280,6 +296,10 @@ development: {X_development.shape[0]} samples""")
         split_hash=split_report["split_hash"],
         cost_fn=10.0,
         cost_fp=1.0,
+        schema_version=policy_version,
+        split_manifest=json.loads(args.split_manifest.read_text())
+        if policy_version == 2
+        else None,
     )
     reporting.save_json(policy, MODELS_PATH / "decision_policy.json")
     if model_kind == "prevalence":
@@ -385,8 +405,8 @@ training class priors: P(benign)={class_priors[0]:.4f}, P(melanoma)={class_prior
     def print_threshold_comparison(split_name, cost_metrics, map_metrics):
         msg = f"""
 {split_name} threshold compare
-cost threshold {cost_threshold:.4f}: recall={cost_metrics["recall"]:.3f}, specificity={cost_metrics["specificity"]:.3f}, FP={cost_metrics["fp"]}, FN={cost_metrics["fn"]}
-MAP threshold  {map_threshold:.4f}: recall={map_metrics["recall"]:.3f}, specificity={map_metrics["specificity"]:.3f}, FP={map_metrics["fp"]}, FN={map_metrics["fn"]}
+cost threshold {cost_threshold:.4f}: recall={evaluation.format_metric(cost_metrics["recall"], 3)}, specificity={evaluation.format_metric(cost_metrics["specificity"], 3)}, FP={cost_metrics["fp"]}, FN={cost_metrics["fn"]}
+MAP threshold  {map_threshold:.4f}: recall={evaluation.format_metric(map_metrics["recall"], 3)}, specificity={evaluation.format_metric(map_metrics["specificity"], 3)}, FP={map_metrics["fp"]}, FN={map_metrics["fn"]}
 """
         print(msg)
 
@@ -445,6 +465,8 @@ development: {ece_development:.4f}""")
     )
 
     metrics_summary = {
+        "metrics_version": 2,
+        "decision_policy_version": policy_version,
         "pipeline": f"classical_{model_kind}",
         "task": "binary melanoma-vs-benign classification",
         "positive_class": "melanoma",
@@ -587,7 +609,9 @@ plots generated and saved
                 "prediction": predictions,
                 "prediction_map": map_predictions,
                 "prob_melanoma": probabilities,
-                "raw_score": raw_scores[split_name],
+                "raw_score": calibration.expit(raw_scores[split_name])
+                if policy_version == 2
+                else raw_scores[split_name],
                 "corrected_score": applied[split_name]["corrected_score"],
                 "review_recommended": applied[split_name]["review_recommended"],
                 "score": np.where(predictions == 1, probabilities, 1 - probabilities),
@@ -595,6 +619,9 @@ plots generated and saved
             }
         )
 
+        if policy_version == 2:
+            df_pred["calibration_score"] = raw_scores[split_name]
+            df_pred["ranking_score"] = applied[split_name]["ranking_score"]
         csv_path = RESULTS_PATH / "tables" / f"predictions_{split_name}.csv"
         df_pred.to_csv(csv_path, index=False)
         print(f"  Saved {len(df_pred)} predictions to {csv_path.name}")

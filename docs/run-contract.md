@@ -22,6 +22,13 @@ that diff and those source files under `inputs/`. The `environment` object recor
 Python, platform, machine, package versions, and the selected device. No exported
 field needs a local absolute data path.
 
+The development split manifest keeps schema 1 when the eligible rows already
+express every known link. If an excluded metadata row connects eligible images,
+schema 2 adds `identity_components`: an image ID to source-component ID map.
+Grouping and allocation use those pre-exclusion links. The map is covered by the
+split hash and checked again when the manifest is loaded. The accepted v1
+development manifest remains schema 1 with its original allocation and hash.
+
 The classical command uses `classical_prevalence`, `classical_logistic` or
 `classical_gmm` as its pipeline and model key. Each produces the same
 prediction roles and metrics summary. A failed GMM fit records whether
@@ -40,6 +47,8 @@ rules.
 names the manifest's connected component, the unit used for grouped uncertainty
 estimates. Each pipeline's role-specific CSV has the same common columns and
 keeps its model-specific fields, such as MAP decisions or MC uncertainty.
+CSV readers treat identity columns as strings, including numeric-looking IDs and
+literal `NA` or `NULL`; probabilities remain numeric and round-trip accurately.
 
 The `artifacts` map gives a SHA-256 digest for every file except `run.json`.
 Validation checks the complete file set, hashes, JSON and array syntax, array

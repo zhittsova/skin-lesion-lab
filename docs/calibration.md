@@ -5,6 +5,10 @@ selection. `models/decision_policy.json` records the fitted coefficients, input
 IDs, split identity, loss weight, decision threshold and referral cutoffs. The
 pipelines apply this policy to development data. They do not refit it there.
 
+The rules below describe policy v1, which remains the default and the historical
+replay contract. [Policy v2](calibration-v2.md) is an explicit opt-in for future
+GMM experiments. [Metric semantics](numerical-contracts.md) are versioned separately.
+
 ## Score meanings
 
 Prediction tables keep `raw_score`, `corrected_score`, and `prob_melanoma` separate.
