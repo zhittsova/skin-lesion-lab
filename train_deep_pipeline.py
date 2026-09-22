@@ -94,6 +94,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
+        "--image-cache",
+        choices=["none", "resized"],
+        default="none",
+        help="Cache resized RGB pixels once per run; augmentation remains per access.",
+    )
+    parser.add_argument(
+        "--image-cache-max-bytes",
+        type=int,
+        default=536870912,
+        help="Maximum cached RGB payload; excludes model and Python memory.",
+    )
+    parser.add_argument(
         "--device",
         choices=["cpu", "auto", "cuda", "mps"],
         default="cpu",
@@ -120,12 +132,14 @@ def make_loader(
     train: bool,
     num_workers: int,
     seed: int = 42,
+    resized_cache: deep.ResizedImageCache | None = None,
 ) -> DataLoader:
     dataset = deep.SkinLesionImageDataset(
         image_ids=image_ids[indices],
         labels=labels[indices],
         images_dir=images_dir,
         transform=deep.build_transforms(image_size=image_size, train=train),
+        resized_cache=resized_cache,
     )
     return DataLoader(
         dataset,
@@ -140,6 +154,13 @@ def make_loader(
 
 def validate_training_config(args) -> None:
     """Reject settings that cannot represent a valid S06 training run."""
+    cache_mode = getattr(args, "image_cache", "none")
+    if cache_mode not in {"none", "resized"}:
+        raise ValueError("invalid image_cache")
+    if getattr(args, "image_cache_max_bytes", 536870912) <= 0:
+        raise ValueError("image cache limit must be positive")
+    if cache_mode == "resized" and args.num_workers != 0:
+        raise ValueError("resized image cache requires num_workers=0")
     if args.architecture not in {"small_cnn", "efficientnet_b0"}:
         raise ValueError("invalid architecture")
     if args.architecture == "small_cnn" and (
@@ -495,6 +516,30 @@ def _run(args) -> None:
     )
     splitting.print_split_summary(labels, split_indices, lesion_ids)
 
+    cache_mode = getattr(args, "image_cache", "none")
+    cache_limit = getattr(args, "image_cache_max_bytes", 536870912)
+    resized_cache = (
+        deep.ResizedImageCache(image_ids, args.images_dir, args.image_size, cache_limit)
+        if cache_mode == "resized"
+        else None
+    )
+    cache_record = {
+        "mode": cache_mode,
+        "image_count": len(resized_cache) if resized_cache is not None else 0,
+        "image_size": args.image_size,
+        "pixel_bytes": resized_cache.cache_bytes if resized_cache is not None else 0,
+        "max_pixel_bytes": cache_limit,
+        "build_seconds": resized_cache.cache_build_seconds
+        if resized_cache is not None
+        else 0,
+        "builds": int(resized_cache is not None),
+        "scope": "one run; shared across partition loaders and learning-rate candidates",
+        "payload": "decoded RGB pixels after deterministic resize; no labels or fitted statistics",
+        "augmentation": "sampled on every training access",
+        "memory_limit_includes_process_overhead": False,
+    }
+    reporting.save_json(cache_record, args.results_dir / "image_cache.json")
+
     print("\n2. preparing candidate search")
     device = deep.get_default_device(getattr(args, "device", "cpu"))
     print(f"device: {device}")
@@ -557,6 +602,7 @@ def _run(args) -> None:
                 train=True,
                 num_workers=args.num_workers,
                 seed=args.seed,
+                resized_cache=resized_cache,
             )
             selection_loader = make_loader(
                 image_ids,
@@ -568,6 +614,7 @@ def _run(args) -> None:
                 train=False,
                 num_workers=args.num_workers,
                 seed=args.seed + 1,
+                resized_cache=resized_cache,
             )
             model = deep.build_model(
                 architecture=args.architecture,
@@ -738,6 +785,7 @@ def _run(args) -> None:
         train=False,
         num_workers=args.num_workers,
         seed=args.seed + 2,
+        resized_cache=resized_cache,
     )
     development_loader = make_loader(
         image_ids,
@@ -749,6 +797,7 @@ def _run(args) -> None:
         train=False,
         num_workers=args.num_workers,
         seed=args.seed + 3,
+        resized_cache=resized_cache,
     )
 
     if args.architecture == "small_cnn":
@@ -765,6 +814,7 @@ def _run(args) -> None:
         else None
     )
     training_metadata = {
+        "image_cache": cache_record,
         "architecture": args.architecture,
         "mode": mode,
         "weights": {
