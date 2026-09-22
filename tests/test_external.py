@@ -284,6 +284,7 @@ class ExternalContractTests(unittest.TestCase):
                     "missing_image": 1,
                 },
             )
+            self.assertEqual(manifest["rows"][4]["reason"], "excluded_modality")
             self.assertEqual(
                 manifest["rows"][0]["group_id"], manifest["rows"][1]["group_id"]
             )
