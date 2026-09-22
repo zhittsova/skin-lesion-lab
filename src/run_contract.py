@@ -36,10 +36,25 @@ PREDICTION_COLUMNS = (
     "prob_melanoma",
     "prediction",
 )
+IDENTITY_COLUMNS = (
+    "run_id",
+    "model_key",
+    "role",
+    "split_hash",
+    "image_id",
+    "lesion_id",
+    "group_id",
+)
 
 
-def _read_csv(path):
-    return pd.read_csv(path, float_precision="round_trip")
+def _read_csv(path: Path) -> pd.DataFrame:
+    """Read prediction numbers accurately while keeping IDs lexical."""
+    return pd.read_csv(
+        path,
+        dtype={name: str for name in IDENTITY_COLUMNS},
+        keep_default_na=False,
+        float_precision="round_trip",
+    )
 
 
 def sha256(path: Path) -> str:

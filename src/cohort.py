@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import pandas as pd
 
-from src.splitting import LABEL_POLICY_VERSION, metadata_hash
+from src.splitting import LABEL_POLICY_VERSION, _components, metadata_hash
 
 HAM_LABELS = {"mel": 1, "nv": 0, "bkl": 0, "df": 0, "vasc": 0}
 HAM_EXCLUDED = {"bcc", "scc"}
@@ -174,6 +174,16 @@ def build_cohort(
     id_column = "image_id" if source == "ham10000" else "isic_id"
     image_ids = [_validate_id(value, id_column) for value in df[id_column]]
     lesion_ids = [_validate_id(value, "lesion_id") for value in df["lesion_id"]]
+    patient_ids = [
+        _validate_id(value, "patient_id") if _field(value) else ""
+        for value in df.get("patient_id", [""] * len(df))
+    ]
+    duplicate_ids = [
+        _validate_id(value, "duplicate_cluster_id") if _field(value) else ""
+        for value in df.get("duplicate_cluster_id", [""] * len(df))
+    ]
+    if any(patient_ids) and not all(patient_ids):
+        raise ValueError("partial patient IDs are unsupported; resolve missing linkage")
     if len(image_ids) != len(set(image_ids)):
         raise ValueError("duplicate image IDs")
     images_root = Path(images_dir).resolve()
@@ -181,21 +191,35 @@ def build_cohort(
     outcomes = []
     seen_content = {}
     lesion_codes = {}
-    for (_, row), image_id, lesion_id in zip(df.iterrows(), image_ids, lesion_ids):
+    link_rows = []
+    for (_, row), image_id, lesion_id, patient_id, duplicate_id in zip(
+        df.iterrows(), image_ids, lesion_ids, patient_ids, duplicate_ids
+    ):
         code, target, reason = _diagnosis(row, source)
         if lesion_id in lesion_codes and lesion_codes[lesion_id] != code:
             raise ValueError(f"conflicting lesion diagnoses for {lesion_id}")
         lesion_codes[lesion_id] = code
+        image_path = images_root / f"{image_id}.jpg"
+        digest = ""
+        if image_path.is_file():
+            if not image_path.resolve().is_relative_to(images_root):
+                raise ValueError(f"unsafe image path: {image_id}")
+            digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        link_rows.append(
+            {
+                "image_id": image_id,
+                "lesion_id": lesion_id,
+                "patient_id": patient_id,
+                "duplicate_cluster_id": duplicate_id,
+                "image_sha256": digest,
+            }
+        )
         if reason == "retained":
-            image_path = images_root / f"{image_id}.jpg"
             if not image_path.is_file():
                 reason = "missing_image"
-            elif not image_path.resolve().is_relative_to(images_root):
-                raise ValueError(f"unsafe image path: {image_id}")
             elif cv2.imread(str(image_path)) is None:
                 reason = "corrupt_image"
             else:
-                digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
                 if digest in seen_content:
                     raise ValueError(
                         f"duplicate image content: {seen_content[digest]} and {image_id}"
@@ -210,8 +234,8 @@ def build_cohort(
                     "dx": code,
                     "target": target,
                     "image_sha256": digest,
-                    "patient_id": _field(row.get("patient_id", "")),
-                    "duplicate_cluster_id": _field(row.get("duplicate_cluster_id", "")),
+                    "patient_id": patient_id,
+                    "duplicate_cluster_id": duplicate_id,
                 }
             )
     outcomes.sort(key=lambda item: item["image_id"])
@@ -223,9 +247,17 @@ def build_cohort(
         pd.DataFrame.from_records(records).sort_values("isic_id").reset_index(drop=True)
     )
     frame["target"] = frame["target"].astype("int64")
+    links = {
+        row["image_id"]: min(member["image_id"] for member in group)
+        for group in _components(link_rows, require_consistent_labels=False)
+        for row in group
+    }
     frame.attrs = {
         "source": source,
         "label_policy_version": LABEL_POLICY_VERSION,
         "metadata_content_hash": metadata_hash(df),
+        "identity_components": {
+            image_id: links[image_id] for image_id in frame.isic_id
+        },
     }
     return CohortResult(frame=frame, outcomes=outcomes, counts=counts)
