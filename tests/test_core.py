@@ -59,7 +59,7 @@ class BayesianPipelineTests(unittest.TestCase):
             summary["mean_prob_melanoma"],
             summary["variance"],
             threshold=0.5,
-            uncertainty_quantile=0.8,
+            variance_cutoff=0.01,
         )
 
         self.assertEqual(summary["mean_prob_melanoma"].shape, (3,))

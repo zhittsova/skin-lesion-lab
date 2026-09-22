@@ -15,6 +15,7 @@ import seaborn as sns
 import torch
 from sklearn.metrics import roc_curve
 from src import (
+    calibration,
     data,
     deep,
     evaluation,
@@ -189,17 +190,10 @@ def find_best_threshold_by_validation_cost(
     cost_fn: float,
     cost_fp: float,
 ) -> tuple[float, pd.DataFrame]:
-    rows = []
-    for threshold in np.linspace(0.0, 1.0, 501):
-        metrics = metrics_for_threshold(y_true, y_prob, threshold, cost_fn, cost_fp)
-        rows.append(metrics)
-
-    frame = pd.DataFrame(rows)
-    best = frame.sort_values(
-        ["average_cost", "recall", "specificity"],
-        ascending=[True, False, False],
-    ).iloc[0]
-    return float(best["threshold"]), frame
+    threshold, rows = calibration.select_cost_threshold(
+        y_true, y_prob, cost_fn, cost_fp
+    )
+    return threshold, pd.DataFrame(rows)
 
 
 def save_deep_metrics_tables(
@@ -276,7 +270,9 @@ def add_chart_header(fig, ax, title: str, subtitle: str) -> None:
     sns.despine(ax=ax)
 
 
-def build_uncertainty_frame(mc_result: dict, threshold: float) -> pd.DataFrame:
+def build_uncertainty_frame(
+    mc_result: dict, threshold: float, policy: dict
+) -> pd.DataFrame:
     summary = uncertainty.summarize_mc_dropout_probabilities(
         mc_result["all_probabilities"]
     )
@@ -288,11 +284,21 @@ def build_uncertainty_frame(mc_result: dict, threshold: float) -> pd.DataFrame:
             "mean_prob_melanoma": summary["mean_prob_melanoma"],
             "predictive_std": np.sqrt(summary["variance"]),
             "predictive_entropy": summary["predictive_entropy"],
+            "expected_entropy": summary["expected_entropy"],
             "mutual_information": summary["mutual_information"],
         }
     )
-    frame["prediction"] = (frame["mean_prob_melanoma"] >= threshold).astype(int)
-    frame["near_threshold"] = np.abs(frame["mean_prob_melanoma"] - threshold) <= 0.05
+    applied = calibration.apply_policy(
+        policy, mc_result["all_probabilities"], variances=summary["variance"]
+    )
+    frame["raw_score"] = summary["mean_prob_melanoma"]
+    frame["corrected_score"] = applied["corrected_score"]
+    frame["prob_melanoma"] = applied["calibrated_probability"]
+    frame["prediction"] = applied["prediction"]
+    frame["review_recommended"] = applied["review_recommended"]
+    frame["near_threshold"] = (
+        np.abs(frame["prob_melanoma"] - threshold) <= policy["referral"]["margin"]
+    )
     return frame
 
 
@@ -336,7 +342,7 @@ def plot_mean_vs_epistemic_uncertainty(
     palette = {"Benign": BLUE["mid"], "Melanoma": PINK["dark"]}
     sns.scatterplot(
         data=frame,
-        x="mean_prob_melanoma",
+        x="prob_melanoma",
         y="mutual_information",
         hue="target_name",
         palette=palette,
@@ -355,13 +361,13 @@ def plot_mean_vs_epistemic_uncertainty(
     )
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(bottom=0)
-    ax.set_xlabel("MC predictive mean P(melanoma)")
-    ax.set_ylabel("Mutual information (epistemic uncertainty)")
+    ax.set_xlabel("Fitted melanoma probability")
+    ax.set_ylabel("Raw MC mutual information (nats)")
     ax.legend(frameon=False, loc="upper right")
     add_chart_header(
         fig,
         ax,
-        "MC Dropout epistemic uncertainty on the development set",
+        "MC dropout disagreement on the development set",
         "Each point is one image; uncertainty is higher when dropout passes disagree.",
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -373,12 +379,13 @@ def save_predictions(
     mc_result: dict,
     threshold: float,
     output_path: Path,
+    policy: dict,
 ) -> pd.DataFrame:
-    frame = build_uncertainty_frame(mc_result, threshold=threshold)
+    frame = build_uncertainty_frame(mc_result, threshold=threshold, policy=policy)
     frame["score"] = np.where(
         frame["prediction"] == 1,
-        frame["mean_prob_melanoma"],
-        1 - frame["mean_prob_melanoma"],
+        frame["prob_melanoma"],
+        1 - frame["prob_melanoma"],
     )
     frame["model_name"] = "Project_Deep_CNN_MC_Dropout"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,7 +399,7 @@ def main() -> None:
         args.runs_dir,
         run_id=getattr(args, "run_id", None),
         pipeline=f"deep_{args.architecture}",
-        config=vars(args),
+        config={**vars(args), "decision_policy_version": 1, "metrics_version": 2},
         inputs={
             "metadata": args.metadata_path,
             "split_manifest": args.split_manifest,
@@ -552,6 +559,10 @@ def _run(args) -> None:
             raise ValueError("non-finite training loss")
         if not np.isfinite(selection_loss):
             raise ValueError("non-finite checkpoint selection loss")
+        if selection_metrics["roc_auc"] is None:
+            raise ValueError(
+                "no finite checkpoint selection AUC: both classes required"
+            )
         score = float(selection_metrics["roc_auc"])
 
         history_row = {
@@ -694,10 +705,30 @@ def _run(args) -> None:
     )
 
     print("\n5. threshold selection and evaluation")
-    formula_threshold = args.cost_fp / (args.cost_fp + args.cost_fn)
+    policy = calibration.fit_policy(
+        calibration_mc["label"],
+        calibration_mc["all_probabilities"],
+        image_ids=calibration_mc["image_id"],
+        split_hash=split_report["split_hash"],
+        weight=pos_weight if pos_weight is not None else 1.0,
+        variances=calibration_mc["all_probabilities"].var(axis=0, ddof=1),
+        cost_fn=args.cost_fn,
+        cost_fp=args.cost_fp,
+    )
+    policy["model"] = {
+        "architecture": args.architecture,
+        "checkpoint_sha256": run_contract.sha256(best_checkpoint),
+    }
+    reporting.save_json(policy, args.models_dir / "decision_policy.json")
+    calibration_mc["calibrated_probability"] = calibration.apply_policy(
+        policy,
+        calibration_mc["all_probabilities"],
+        variances=calibration_mc["all_probabilities"].var(axis=0, ddof=1),
+    )["calibrated_probability"]
+    formula_threshold = policy["decision"]["formula_threshold"]
     selected_threshold, threshold_sweep = find_best_threshold_by_validation_cost(
         calibration_mc["label"],
-        calibration_mc["mean_probability"],
+        calibration_mc["calibrated_probability"],
         cost_fn=args.cost_fn,
         cost_fp=args.cost_fp,
     )
@@ -711,6 +742,27 @@ def _run(args) -> None:
         dataloader=development_loader,
         device=device,
         n_passes=args.mc_samples,
+    )
+
+    development_mc["calibrated_probability"] = calibration.apply_policy(
+        policy,
+        development_mc["all_probabilities"],
+        variances=development_mc["all_probabilities"].var(axis=0, ddof=1),
+    )["calibrated_probability"]
+    calibration_report = {
+        role: calibration.policy_report(
+            policy,
+            mc["label"],
+            mc["all_probabilities"],
+            variances=mc["all_probabilities"].var(axis=0, ddof=1),
+        )
+        for role, mc in (
+            ("calibration", calibration_mc),
+            ("development", development_mc),
+        )
+    }
+    reporting.save_json(
+        calibration_report, args.results_dir / "calibration_report.json"
     )
 
     np.save(
@@ -736,7 +788,7 @@ def _run(args) -> None:
         "development": development_mc,
     }.items():
         y_true = mc_result["label"]
-        y_prob = mc_result["mean_probability"]
+        y_prob = mc_result["calibrated_probability"]
         metrics_by_split[split_name] = {
             "cost_formula_threshold": metrics_for_threshold(
                 y_true, y_prob, formula_threshold, args.cost_fn, args.cost_fp
@@ -751,10 +803,10 @@ def _run(args) -> None:
 
     ece_by_split = {
         "calibration": evaluation.compute_calibration_error(
-            calibration_mc["label"], calibration_mc["mean_probability"]
+            calibration_mc["label"], calibration_mc["calibrated_probability"]
         ),
         "development": evaluation.compute_calibration_error(
-            development_mc["label"], development_mc["mean_probability"]
+            development_mc["label"], development_mc["calibrated_probability"]
         ),
     }
     save_deep_metrics_tables(
@@ -765,16 +817,18 @@ def _run(args) -> None:
     development_predictions = save_predictions(
         development_mc,
         threshold=selected_threshold,
+        policy=policy,
         output_path=tables_dir / f"{args.architecture}_predictions_development.csv",
     )
     save_predictions(
         calibration_mc,
         threshold=selected_threshold,
+        policy=policy,
         output_path=tables_dir / f"{args.architecture}_predictions_calibration.csv",
     )
 
     fpr, tpr, auc_score = evaluation.compute_roc_curve(
-        development_mc["label"], development_mc["mean_probability"]
+        development_mc["label"], development_mc["calibrated_probability"]
     )
     plots.plot_roc_curve(
         fpr,
@@ -785,7 +839,7 @@ def _run(args) -> None:
     )
     cm_development = evaluation.compute_confusion_matrix(
         development_mc["label"],
-        (development_mc["mean_probability"] >= selected_threshold).astype(int),
+        (development_mc["calibrated_probability"] >= selected_threshold).astype(int),
     )
     plots.plot_confusion_matrix(
         cm_development,
@@ -793,6 +847,15 @@ def _run(args) -> None:
         title=f"{args.architecture} confusion matrix",
     )
 
+    mean_probs, frequencies, counts = evaluation.compute_calibration_curve(
+        development_mc["label"], development_mc["calibrated_probability"]
+    )
+    plots.plot_calibration_curve(
+        mean_probs,
+        frequencies,
+        counts,
+        save_path=str(figures_dir / f"{args.architecture}_calibration.png"),
+    )
     plot_uncertainty_distribution(
         development_predictions,
         figures_dir / f"{args.architecture}_mc_dropout_uncertainty_distribution.png",
@@ -801,11 +864,11 @@ def _run(args) -> None:
         development_predictions,
         figures_dir
         / f"{args.architecture}_mc_dropout_mean_vs_epistemic_uncertainty.png",
-        threshold=formula_threshold,
+        threshold=selected_threshold,
     )
 
     fpr_table, tpr_table, roc_thresholds = roc_curve(
-        development_mc["label"], development_mc["mean_probability"]
+        development_mc["label"], development_mc["calibrated_probability"]
     )
     pd.DataFrame(
         {
@@ -816,6 +879,8 @@ def _run(args) -> None:
     ).to_csv(tables_dir / f"{args.architecture}_roc_curve_points.csv", index=False)
 
     summary = {
+        "metrics_version": 2,
+        "decision_policy_version": 1,
         "pipeline": "Project-owned deep CNN with MC Dropout",
         "architecture": args.architecture,
         "task": "binary melanoma-vs-benign classification",
@@ -842,6 +907,9 @@ def _run(args) -> None:
             "history": history,
             "best_checkpoint": f"models/{best_checkpoint.name}",
         },
+        "score_semantics": "calibration-fitted probability; uncertainty summarizes raw MC scores",
+        "decision_policy": "models/decision_policy.json",
+        "calibration_report": calibration_report,
         "metrics": metrics_by_split,
         "expected_calibration_error": ece_by_split,
         "mc_dropout_uncertainty": {

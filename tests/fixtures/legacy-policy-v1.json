@@ -1,0 +1,109 @@
+{
+  "policy": {
+    "schema_version": 1,
+    "fit": {
+      "role": "calibration",
+      "image_ids": [
+        "001",
+        "NA",
+        "000",
+        "NULL"
+      ],
+      "split_hash": "legacy-synthetic",
+      "data_sha256": "951d88146390e0ef83dadff45d8842a7fffb17c14912564f315f572f1bab8723"
+    },
+    "score_transform": {
+      "positive_weight": 1.0,
+      "aggregation": "correct_each_pass_then_mean"
+    },
+    "calibrator": {
+      "method": "regularized_sigmoid",
+      "C": 1.0,
+      "logit_clip": 1e-10,
+      "solver": "lbfgs",
+      "max_iter": 1000,
+      "tol": 1e-10,
+      "penalty": "l2_slope_only",
+      "class_weight": null,
+      "slope": 0.9723071907237371,
+      "intercept": 0.278935960211011
+    },
+    "decision": {
+      "threshold": 0.6622131931051893,
+      "formula_threshold": 0.09090909090909091,
+      "comparison": ">=",
+      "cost_fn": 10.0,
+      "cost_fp": 1.0,
+      "tie_break": "recall_desc_specificity_desc_threshold_asc"
+    },
+    "referral": {
+      "margin": 0.05,
+      "variance_source": "raw_mc_sample_variance",
+      "ddof": 1,
+      "quantile_method": "linear",
+      "mc_passes": null,
+      "quantile": 0.9,
+      "variance_cutoff": null,
+      "grid_quantiles": [],
+      "grid_cutoffs": [],
+      "comparison": ">="
+    }
+  },
+  "scores": [
+    0.0,
+    1e-20,
+    1e-11,
+    1e-10,
+    0.25,
+    0.5,
+    0.75,
+    0.99999999999,
+    1.0
+  ],
+  "expected": {
+    "corrected_score": [
+      0.0,
+      1e-20,
+      1e-11,
+      1e-10,
+      0.25,
+      0.5,
+      0.75,
+      0.99999999999,
+      1.0
+    ],
+    "calibrated_probability": [
+      2.500739425354703e-10,
+      2.500739425354703e-10,
+      2.500739425354703e-10,
+      2.500739425354703e-10,
+      0.3123291586361459,
+      0.5692853411283364,
+      0.7936591359843068,
+      0.9999999998568512,
+      0.9999999998568512
+    ],
+    "prediction": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1
+    ],
+    "review_recommended": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  }
+}

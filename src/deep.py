@@ -321,46 +321,56 @@ def predict_with_mc_dropout(
     n_passes: int = 30,
 ) -> dict:
     """Run dropout-active inference and return all stochastic probabilities."""
-    if n_passes < 2:
-        raise ValueError("MC Dropout needs at least two stochastic passes")
-
+    if isinstance(n_passes, bool) or not isinstance(n_passes, int) or n_passes < 2:
+        raise ValueError("MC dropout needs an integer pass count of at least two")
+    modes = [(module, module.training) for module in model.modules()]
     all_samples = []
-    labels_all = None
-    image_ids = None
-    image_paths = None
-
-    for _ in range(n_passes):
+    identity = None
+    try:
         model.eval()
         set_dropout_layers_to_train(model)
-
-        pass_probabilities = []
-        pass_labels = []
-        pass_image_ids = []
-        pass_image_paths = []
-
-        for images, labels, batch_image_ids, batch_image_paths in dataloader:
-            images = images.to(device)
-            logits = model(images).view(-1)
-            probs = torch.sigmoid(logits).detach().cpu().numpy()
-
-            pass_probabilities.append(probs)
-            pass_labels.append(labels.numpy())
-            pass_image_ids.extend(batch_image_ids)
-            pass_image_paths.extend(batch_image_paths)
-
-        all_samples.append(np.concatenate(pass_probabilities))
-
-        if labels_all is None:
-            labels_all = np.concatenate(pass_labels).astype(int)
-            image_ids = list(pass_image_ids)
-            image_paths = list(pass_image_paths)
-
+        for _ in range(n_passes):
+            pass_probabilities, pass_labels, ids, paths = [], [], [], []
+            for images, labels, batch_ids, batch_paths in dataloader:
+                if not torch.isfinite(images).all():
+                    raise ValueError("MC inputs must be finite")
+                logits = model(images.to(device)).view(-1)
+                probs = torch.sigmoid(logits).detach().cpu().numpy()
+                targets = labels.detach().cpu().numpy()
+                if (
+                    not np.isfinite(logits.detach().cpu().numpy()).all()
+                    or targets.shape != probs.shape
+                    or not np.isin(targets, [0, 1]).all()
+                    or len(batch_ids) != len(probs)
+                    or len(batch_paths) != len(probs)
+                ):
+                    raise ValueError("invalid MC batch outputs or identity")
+                pass_probabilities.append(probs)
+                pass_labels.extend(targets.tolist())
+                ids.extend(batch_ids)
+                paths.extend(batch_paths)
+            if (
+                not ids
+                or len(set(ids)) != len(ids)
+                or len(set(paths)) != len(paths)
+                or any(not isinstance(i, str) or not i for i in ids + paths)
+            ):
+                raise ValueError("MC pass needs nonempty unique sample IDs and paths")
+            current = (ids, paths, pass_labels)
+            if identity is not None and current != identity:
+                raise ValueError("MC pass identity/order differs across passes")
+            identity = current
+            all_samples.append(np.concatenate(pass_probabilities))
+    finally:
+        # Assign flags directly so a parent's train() cannot overwrite children.
+        for module, training in modes:
+            module.training = training
     samples = np.stack(all_samples, axis=0)
     return {
         "all_probabilities": samples,
         "mean_probability": samples.mean(axis=0),
         "uncertainty": samples.std(axis=0, ddof=1),
-        "label": labels_all,
-        "image_id": image_ids,
-        "image_path": image_paths,
+        "label": np.asarray(identity[2], dtype=int),
+        "image_id": identity[0],
+        "image_path": identity[1],
     }

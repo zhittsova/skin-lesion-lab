@@ -37,10 +37,11 @@ selection ROC-AUC wins; an exact tie keeps the earliest epoch. Calibration and
 development rows do not select the checkpoint. The saved checkpoint and training
 metadata record the selection rule and selected epoch.
 
-Weighting changes the interpretation of raw sigmoid scores. Probability
-calibration and decision rules require their separate validation before scores
-can support a probability-based cost rule. The illustrative 10:1 costs do not
-establish a clinical operating point.
+Weighting changes the interpretation of raw sigmoid scores.
+[Calibration and decision rules](calibration.md) fit on the calibration split
+and persist before development inference. Fitting does not establish deployment
+calibration, and the illustrative 10:1 costs do not establish a clinical operating
+point.
 
 ## Reproducibility
 

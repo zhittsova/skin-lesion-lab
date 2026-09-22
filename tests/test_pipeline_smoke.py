@@ -13,11 +13,17 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from src import data, gmm, run_contract, splitting
+from src import calibration, data, gmm, run_contract, splitting
 
 
 class SharedManifestSmokeTests(unittest.TestCase):
     def test_both_pipelines_and_summary_preserve_the_same_development_ids(self):
+        self._flow(1)
+
+    def test_v2_gmm_and_summary_preserve_finite_scores(self):
+        self._flow(2)
+
+    def _flow(self, policy_version):
         import summarize_results
         import train_deep_pipeline
         import train_pipeline
@@ -91,6 +97,8 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         str(classical_root),
                         "--run-id",
                         "classical-fixture",
+                        "--decision-policy-version",
+                        str(policy_version),
                     ],
                 ),
                 patch.object(train_pipeline, "plots", Mock()),
@@ -160,6 +168,40 @@ class SharedManifestSmokeTests(unittest.TestCase):
                 predictions = run_contract._read_csv(
                     location / "results" / "tables" / filename
                 )
+                policy_path = location / "models" / "decision_policy.json"
+                policy = json.loads(policy_path.read_text())
+                self.assertEqual(
+                    policy["fit"]["image_ids"], manifest["partitions"]["calibration"]
+                )
+                self.assertEqual(policy["fit"]["split_hash"], manifest["split_hash"])
+                if location == classical:
+                    scores = predictions[
+                        "calibration_score" if policy_version == 2 else "raw_score"
+                    ].to_numpy()
+                    self.assertEqual(policy["schema_version"], policy_version)
+                    if policy_version == 2:
+                        self.assertIn("ranking_score", predictions)
+                    variances = None
+                else:
+                    scores = np.load(
+                        location
+                        / "arrays"
+                        / "small_cnn_development_mc_probabilities.npy"
+                    )
+                    variances = scores.var(axis=0, ddof=1)
+                applied = calibration.apply_policy(policy, scores, variances=variances)
+                np.testing.assert_allclose(
+                    predictions.prob_melanoma,
+                    applied["calibrated_probability"],
+                    rtol=1e-6,
+                )
+                np.testing.assert_array_equal(
+                    predictions.prediction, applied["prediction"]
+                )
+                np.testing.assert_array_equal(
+                    predictions.review_recommended, applied["review_recommended"]
+                )
+
                 self.assertEqual(
                     predictions.image_id.tolist(), manifest["partitions"]["development"]
                 )
@@ -203,6 +245,9 @@ class SharedManifestSmokeTests(unittest.TestCase):
                 )
                 reported = json.loads((run / "results" / summary_file).read_text())
                 recomputed = run_contract.recompute_report(run)
+                self.assertEqual(
+                    recomputed["calibration_report"], reported["calibration_report"]
+                )
                 for role, points in recomputed["metrics"].items():
                     for point, scores in points.items():
                         for metric, value in scores.items():
@@ -234,6 +279,48 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         self.assertAlmostEqual(
                             value, reported["mc_dropout_uncertainty"][metric]
                         )
+            if policy_version == 2:
+                producer_path = classical / "results/tables/predictions_development.csv"
+                record_path = classical / "run.json"
+                original_producer = producer_path.read_bytes()
+                original_record = record_path.read_bytes()
+                for column in ("calibration_score", "ranking_score"):
+                    altered = run_contract._read_csv(producer_path)
+                    altered.loc[0, column] += 1
+                    altered.to_csv(producer_path, index=False)
+                    record = json.loads(original_record)
+                    record["artifacts"][
+                        "results/tables/predictions_development.csv"
+                    ] = run_contract.sha256(producer_path)
+                    record_path.write_text(json.dumps(record))
+                    with (
+                        self.subTest(column=column),
+                        self.assertRaisesRegex(ValueError, "decision policy"),
+                    ):
+                        run_contract.validate_run(classical)
+                    producer_path.write_bytes(original_producer)
+                    record_path.write_bytes(original_record)
+
+            for location in (classical, deep_results):
+                policy_file = location / "models" / "decision_policy.json"
+                record_file = location / "run.json"
+                original_policy, original_record = (
+                    policy_file.read_bytes(),
+                    record_file.read_bytes(),
+                )
+                changed_policy = json.loads(original_policy)
+                changed_policy["decision"]["threshold"] = 1.0
+                policy_file.write_text(json.dumps(changed_policy))
+                changed_record = json.loads(original_record)
+                changed_record["artifacts"]["models/decision_policy.json"] = (
+                    run_contract.sha256(policy_file)
+                )
+                record_file.write_text(json.dumps(changed_record))
+                with self.assertRaisesRegex(ValueError, "decision policy"):
+                    run_contract.validate_run(location)
+                policy_file.write_bytes(original_policy)
+                record_file.write_bytes(original_record)
+
             producer = (
                 deep_results
                 / "results"
@@ -241,19 +328,23 @@ class SharedManifestSmokeTests(unittest.TestCase):
                 / "small_cnn_predictions_development.csv"
             )
             original = producer.read_bytes()
-            altered = run_contract._read_csv(producer)
-            altered.loc[0, "predictive_std"] += 0.2
-            altered.to_csv(producer, index=False)
             record_path = deep_results / "run.json"
             record = json.loads(record_path.read_text())
             producer_key = "results/tables/small_cnn_predictions_development.csv"
-            record["artifacts"][producer_key] = run_contract.sha256(producer)
-            record_path.write_text(json.dumps(record))
-            with self.assertRaisesRegex(ValueError, "deep uncertainty"):
-                run_contract.validate_run(deep_results)
-            producer.write_bytes(original)
-            record["artifacts"][producer_key] = run_contract.sha256(producer)
-            record_path.write_text(json.dumps(record))
+            for field in ("predictive_std", "expected_entropy"):
+                altered = run_contract._read_csv(producer)
+                altered.loc[0, field] += 0.2
+                altered.to_csv(producer, index=False)
+                record["artifacts"][producer_key] = run_contract.sha256(producer)
+                record_path.write_text(json.dumps(record))
+                with (
+                    self.subTest(field=field),
+                    self.assertRaisesRegex(ValueError, "deep uncertainty"),
+                ):
+                    run_contract.validate_run(deep_results)
+                producer.write_bytes(original)
+                record["artifacts"][producer_key] = run_contract.sha256(producer)
+                record_path.write_text(json.dumps(record))
 
             array = deep_results / "arrays" / "small_cnn_development_y_true.npy"
             changed = np.load(array, allow_pickle=False)

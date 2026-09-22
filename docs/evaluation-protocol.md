@@ -53,10 +53,10 @@ separately prepared synthetic cohort, and never subsample a frozen run by image.
 | Confirmation | Unavailable to these development entry points. Requires an untouched independent cohort and a separately frozen release. |
 
 The current deep entry point routes checkpoint evaluation to selection and its
-empirical cost cutoff to calibration. The classical entry point uses training BIC
-and a prespecified illustrative 10:1 cost rule; it reserves calibration rows for
-the later calibration work. Existing weighted CNN probabilities, MC dropout and
-cost/referral methods still need their planned correctness checks. Passing the
+empirical cost cutoff to calibration. The classical GMM uses training BIC
+and illustrative 10:1 costs; it uses calibration rows for
+fitting a sigmoid calibrator after model selection. Both pipelines now persist
+calibration-only decision and referral rules; see [calibration](calibration.md). Passing the
 split contract does not validate those methods.
 
 ## Planned comparison and budgets

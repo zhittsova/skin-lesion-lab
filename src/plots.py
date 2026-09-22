@@ -230,7 +230,17 @@ def plot_calibration_curve(
     )
 
     ax.set_xlabel("Mean Predicted Probability")
-    ax.set_ylabel("Empirical Frequency (True Positive Rate)")
+    ax.set_ylabel("Observed positive fraction")
+    for probability, frequency, count in zip(
+        mean_probs_valid, frequencies_valid, bin_sizes_valid
+    ):
+        ax.annotate(
+            f"n={int(count)}",
+            (probability, frequency),
+            xytext=(4, -12 if frequency > 0.9 else 4),
+            textcoords="offset points",
+            fontsize=8,
+        )
     ax.set_title(title)
     ax.set_xlim([0, 1])
     ax.set_ylim([0, 1])
@@ -317,7 +327,12 @@ def plot_metric_comparison(
     width = 0.25
 
     for i, split_name in enumerate(split_names):
-        values = [metrics_dict[split_name].get(m, 0) for m in metric_names]
+        values = [
+            np.nan
+            if metrics_dict[split_name].get(m) is None
+            else metrics_dict[split_name][m]
+            for m in metric_names
+        ]
         ax.bar(x + i * width, values, width, label=split_name)
 
     ax.set_xlabel("Metrics")
@@ -347,6 +362,7 @@ def plot_threshold_comparison(
         float(metrics_by_point[point_name][metric])
         for point_name in point_names
         for metric in metric_names
+        if metrics_by_point[point_name][metric] is not None
     )
 
     x = np.arange(len(metric_names))
@@ -356,14 +372,17 @@ def plot_threshold_comparison(
     for i, point_name in enumerate(point_names):
         offset = (i - (len(point_names) - 1) / 2) * width
         values = [
-            float(metrics_by_point[point_name][metric]) for metric in metric_names
+            np.nan
+            if metrics_by_point[point_name][metric] is None
+            else float(metrics_by_point[point_name][metric])
+            for metric in metric_names
         ]
         bars = ax.bar(x + offset, values, width, label=point_name)
         for bar, value in zip(bars, values):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height(),
-                f"{value:.2f}",
+                bar.get_height() if np.isfinite(value) else 0,
+                f"{value:.2f}" if np.isfinite(value) else "undefined",
                 ha="center",
                 va="bottom",
                 fontsize=9,

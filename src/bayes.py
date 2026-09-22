@@ -2,6 +2,9 @@
 
 import numpy as np
 
+from src.calibration import cost_threshold
+from src.calibration import probabilities as validate_probabilities
+
 
 def compute_class_priors(y: np.ndarray) -> np.ndarray:
     unique, counts = np.unique(y, return_counts=True)
@@ -33,15 +36,15 @@ def get_melanoma_probability(posteriors: np.ndarray) -> np.ndarray:
 def threshold_with_costs(
     probabilities: np.ndarray, cost_fn: float = 1.0, cost_fp: float = 1.0
 ) -> np.ndarray:
-    threshold = cost_fp / (cost_fp + cost_fn)
+    threshold = cost_threshold(cost_fn, cost_fp)
 
-    predictions = (probabilities >= threshold).astype(int)
+    predictions = (validate_probabilities(probabilities) >= threshold).astype(int)
 
     return predictions
 
 
 def get_threshold_info(cost_fn: float, cost_fp: float) -> dict[str, float | str]:
-    threshold = cost_fp / (cost_fp + cost_fn)
+    threshold = cost_threshold(cost_fn, cost_fp)
     cost_ratio = cost_fn / cost_fp
 
     return {
@@ -77,10 +80,36 @@ def compute_predicted_scores(
 
 
 def print_cost_analysis(cost_fn: float, cost_fp: float) -> None:
-    threshold = cost_fp / (cost_fp + cost_fn)
+    threshold = cost_threshold(cost_fn, cost_fp)
     cost_ratio = cost_fn / cost_fp
 
     print(
         f"\ncosts: FN={cost_fn:.1f}, FP={cost_fp:.1f}, ratio={cost_ratio:.1f}x; "
         f"threshold={threshold:.4f}"
     )
+
+
+def compute_posterior_log_odds(log_likelihoods, class_priors):
+    """V2 GMM score before sigmoid saturation; no smoothed prior."""
+    likelihoods = np.asarray(log_likelihoods, dtype=float)
+    priors = np.asarray(class_priors, dtype=float)
+    if (
+        likelihoods.ndim != 2
+        or likelihoods.shape[1] != 2
+        or not len(likelihoods)
+        or not np.isfinite(likelihoods).all()
+        or priors.shape != (2,)
+        or not np.isfinite(priors).all()
+        or np.any(priors <= 0)
+        or not np.isclose(priors.sum(), 1.0, rtol=0, atol=1e-12)
+    ):
+        raise ValueError(
+            "log odds require finite class likelihoods and positive normalized priors"
+        )
+    with np.errstate(over="ignore", invalid="ignore"):
+        score = (likelihoods[:, 1] - likelihoods[:, 0]) + (
+            np.log(priors[1]) - np.log(priors[0])
+        )
+    if not np.isfinite(score).all():
+        raise ValueError("posterior log odds cannot be represented")
+    return score

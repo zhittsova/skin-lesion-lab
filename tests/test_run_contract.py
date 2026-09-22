@@ -74,6 +74,32 @@ class RunContractTests(unittest.TestCase):
         run.finish(self.manifest, files)
         return run
 
+    def test_saved_v1_summary_replay_is_explicit_and_new_metrics_are_null(self):
+        run = self.complete(probability_by_target={0: 0.1, 1: 0.2})
+        old = self.contract.recompute_report(run.path)
+        self.assertEqual(old["metrics_version"], 1)
+        self.assertEqual(old["metrics"]["development"]["map_threshold"]["precision"], 0)
+        record_path = run.path / "run.json"
+        record = json.loads(record_path.read_text())
+        summary_path = run.path / "results/metrics_summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary["metrics_version"] = 2
+        summary_path.write_text(json.dumps(summary))
+        record["config"]["metrics_version"] = 2
+        record["config_sha256"] = splitting.canonical_hash(record["config"])
+        record["artifacts"]["results/metrics_summary.json"] = self.contract.sha256(
+            summary_path
+        )
+        record_path.write_text(json.dumps(record))
+        new = self.contract.recompute_report(run.path)
+        self.assertIsNone(new["metrics"]["development"]["map_threshold"]["precision"])
+        json.dumps(new, allow_nan=False)
+        record["config"]["metrics_version"] = 99
+        record["config_sha256"] = splitting.canonical_hash(record["config"])
+        record_path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "metrics version"):
+            self.contract.validate_run(run.path)
+
     def test_classical_comparators_recompute_cost_and_map_reports(self):
         for pipeline in ("classical_prevalence", "classical_logistic"):
             with self.subTest(pipeline=pipeline):
