@@ -40,6 +40,7 @@ class ResizedImageCacheTests(unittest.TestCase):
                     ["a", "b"], [0, 1], root, transform, resized_cache=cache
                 )
 
+                first_tensors = []
                 for epoch_seed in (7, 19):
                     deep.set_seed(epoch_seed)
                     expected = [uncached[index] for index in (0, 1, 0)]
@@ -49,6 +50,7 @@ class ResizedImageCacheTests(unittest.TestCase):
 
                     deep.set_seed(epoch_seed)
                     actual = [cached[index] for index in (0, 1, 0)]
+                    first_tensors.append(actual[0][0])
                     actual_python_state = random.getstate()
                     actual_numpy_state = np.random.get_state()
                     actual_rng_state = torch.get_rng_state().clone()
@@ -69,6 +71,8 @@ class ResizedImageCacheTests(unittest.TestCase):
                         actual_numpy_state[1], expected_numpy_state[1]
                     )
                     self.assertEqual(actual_numpy_state[2:], expected_numpy_state[2:])
+                if train:
+                    self.assertFalse(torch.equal(*first_tensors))
 
     def test_each_access_uses_a_copy_of_cached_pixels(self):
         with tempfile.TemporaryDirectory() as tmp:

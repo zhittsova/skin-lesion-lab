@@ -91,10 +91,14 @@ class ProfileDatasetTests(unittest.TestCase):
                 )
                 cached = next(iter(dataset._cache.values()))
                 before = cached.tobytes()
+                augmented = []
                 for seed in range(4):
                     deep.set_seed(seed)
-                    dataset[0]
+                    augmented.append(dataset[0][0])
                 self.assertEqual(cached.tobytes(), before)
+                self.assertTrue(
+                    any(not torch.equal(augmented[0], item) for item in augmented[1:])
+                )
 
     def test_budget_refusal_happens_before_pixel_decode(self):
         with tempfile.TemporaryDirectory() as tmp:
