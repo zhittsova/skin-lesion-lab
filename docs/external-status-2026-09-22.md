@@ -21,10 +21,14 @@ Saved-score reconstruction applies the original policy and metric contracts.
 It does not run models, fit calibration or replace the accepted report.
 
 New execution requires the [v2 release contract](external-release-v2.md). Its
-complete source and dependency checks improve future enforcement. They do not
-retroactively strengthen the original freeze or demonstrate performance for a
-new method. A future evaluation needs a separately reviewed release and a record
-of when its protocol and execution inputs were fixed.
+strict gate revalidates each fitted run, checks manifest attrition against its
+rows at inference and reporting, and compares the captured source and versioned
+runtime dependency inventory with the executing process. An older incomplete
+strict environment snapshot must be captured again for a new reviewed release.
+These checks improve future enforcement. They do not retroactively strengthen
+the original freeze or demonstrate performance for a new method. A future
+evaluation needs a separately reviewed release and a record of when its
+protocol and execution inputs were fixed.
 
 The original local evidence is identified by these SHA-256 values:
 
@@ -34,7 +38,8 @@ The original local evidence is identified by these SHA-256 values:
 | S11 protocol | `edbde5faa236da6cddc93420eeb6384c407ae4aa9e0b9967ffd9e343fff20b00` |
 | External report | `f592c4c0f8b9491f7db4ad3aedfc9d364a11c8d6fa9f3b57c442ba88e5a645d8` |
 
-Use this distinction when revising the story and deck: numerical reconstruction
-supports the saved result, while the incomplete original freeze limits its
-provenance claim. The [development status](development-status-2026-09-22.md)
+Numerical reconstruction supports the saved result, while the incomplete
+original freeze limits its provenance claim. The manuscript decision remains
+no-go. HIBA attribution remains Hospital Italiano de Buenos Aires, CC-BY,
+[DOI 10.34970/587329](https://doi.org/10.34970/587329). The [development status](development-status-2026-09-22.md)
 separately records the retrospective GMM diagnosis and future-policy limits.

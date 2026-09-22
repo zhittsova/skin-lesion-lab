@@ -61,21 +61,22 @@ the training CLI. Unknown versions or disagreement between run and summary fail.
 Legacy single-class ROC-AUC can be NaN in the explicit v1 in-memory helper, but
 cannot be serialized as a new report. Use v2 for new data and reports.
 
-## Downstream benchmark integration
+## Benchmark integration
 
-The benchmark module first appears after this PR. R03 must use the v2 helper for
-precision, sensitivity, specificity, Brier score and ROC-AUC in new endpoints,
-while retaining explicit legacy replay for saved benchmark schemas. Bootstrap
-endpoint calculation must allow a nonempty one-class draw: undefined class rates
-and ROC-AUC are null, while defined rates, Brier score, log loss and cost remain
-numeric. For this new contract, average precision and PR-AUC are also null for a
-one-class draw because the comparison requires both classes. Input validation
-for the original comparison cohort may still require both classes.
+The [benchmark implementation](../src/benchmark.py) uses metric v2 for new
+endpoints, including precision, sensitivity, specificity, Brier score and
+ROC-AUC. A saved report without a metric version is identified as v1 for
+historical replay; accepted report values and hashes remain unchanged. In a
+nonempty one-class bootstrap draw, undefined class rates, ROC-AUC, average
+precision and PR-AUC are null because those comparisons require both classes.
+Defined rates, Brier score, log loss and cost remain numeric. The original
+comparison cohort still requires both classes.
 
-Keep the existing paired-draw semantics: a seed mean or contrast is null if any
-constituent is undefined; count null draws; suppress an interval when its point
-or any draw is undefined. Preserve defined zeros, seed identities and shared
-resampling indices. Do not drop undefined draws or convert nulls to zero.
-Version the benchmark/export change, test one-class draws independently, and
-keep old accepted report values and hashes. F1, if exposed later, must use the
-same direct count formula. No future benchmark module is imported here.
+The paired report uses the same sampled component indices for every model and
+seed. If any constituent endpoint is undefined, its seed mean or contrast is
+null. The report counts undefined draws and omits an interval when the point or
+any draw is undefined. It does not drop those draws or turn null into zero, so a
+missing denominator cannot appear as an improvement. The
+[benchmark guide](benchmark.md) describes the comparison and saved report.
+If F1 is added to benchmark endpoints later, it must use the direct count
+formula above.

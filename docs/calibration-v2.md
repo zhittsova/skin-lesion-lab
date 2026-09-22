@@ -66,8 +66,12 @@ rule and decision settings. Training declares the policy version in the run
 configuration and summary. Run validation checks version agreement, calibration
 input digest, calibration-derived scale, score replay, ranking and decisions.
 `apply_policy` dispatches by version and rejects unsupported versions or score
-contracts. External release and inference integration belongs to the later
-external-cohort correction; it is not provided by this PR.
+contracts. [Strict external releases](external-release-v2.md) validate the fitted
+run and its policy before accepting a release. External inference applies the
+saved v2 policy and records both the finite input and ranking scores in its
+schema-2 prediction table. This makes an opt-in GMM v2 run inspectable under the
+same release checks; it does not add GMM to the primary two-family report or
+measure its real-data performance.
 
 ## What remains historical
 

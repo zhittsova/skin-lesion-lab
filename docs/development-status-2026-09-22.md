@@ -42,3 +42,15 @@ ranking says nothing by itself about probability calibration. The
 [v2 GMM calibration method](calibration-v2.md) and new metric-null contract are
 available for future experiments, but neither produced the accepted S09 result.
 Their synthetic tests establish software behavior, not real-data performance.
+
+## Later external evidence
+
+The six-run HIBA evaluation subsequently used the saved primary pair on 884
+eligible images. Its AUC difference interval includes zero (-0.0016 to 0.1091).
+The [external status](external-status-2026-09-22.md) also records incomplete
+coverage in the original execution freeze. The development result and GMM
+diagnosis do not remove either limit. The manuscript decision remains no-go.
+
+The development data credit is ViDIR Group, Department of Dermatology, Medical University of Vienna. See Philipp Tschandl, Cliff Rosendahl and Harald Kittler, [the HAM10000 data descriptor](https://doi.org/10.1038/sdata.2018.161) (2018), and Noel Codella et al., [the ISIC 2018 challenge paper](https://arxiv.org/abs/1902.03368). The
+[source catalog](../catalog/sources.json) retains the local-match caveat and
+CC-BY-NC terms. No data are redistributed.
