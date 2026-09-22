@@ -27,9 +27,9 @@ class ExternalInferenceTests(unittest.TestCase):
                 )
             x = np.random.default_rng(5).random((8, 128))
             y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
-            fitted, _ = classical.fit_logistic(x, y, x, y)
+            fitted, _ = classical.fit_logistic(x, y, x, y, seed=17)
             with (root / "models/logistic_model.pkl").open("wb") as f:
-                pickle.dump({"fitted": fitted}, f)
+                pickle.dump({"fitted": fitted, "model_kind": "logistic"}, f)
             deep.set_seed(17)
             model = deep.build_model("small_cnn")
             checkpoint = root / "models/small_cnn_mc_dropout.pt"
@@ -40,6 +40,9 @@ class ExternalInferenceTests(unittest.TestCase):
                     "image_size": 32,
                     "dropout": 0.3,
                     "seed": 17,
+                    "fine_tune_backbone": False,
+                    "pretrained": False,
+                    "loss_strategy": "unweighted",
                 },
                 checkpoint,
             )
@@ -49,6 +52,9 @@ class ExternalInferenceTests(unittest.TestCase):
                 "dropout": 0.3,
                 "image_size": 32,
                 "seed": 17,
+                "fine_tune_backbone": False,
+                "pretrained": False,
+                "loss_strategy": "unweighted",
                 "batch_size": 2,
                 "mc_samples": 2,
                 "num_workers": 0,
@@ -110,81 +116,22 @@ class ExternalInferenceTests(unittest.TestCase):
         import json
 
         import pandas as pd
-        from src import splitting
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            model_root = root / "fitted"
-            (model_root / "models").mkdir(parents=True)
-            rows = []
-            for i in range(4):
-                image_id = f"external{i}"
-                Image.new("RGB", (8, 8), (i * 25, 20, 35)).save(
-                    root / f"{image_id}.jpg"
-                )
-                rows.append(
-                    {
-                        "image_id": image_id,
-                        "group_id": f"p{i}",
-                        "target": i // 2,
-                        "reason": "retained",
-                        "image_sha256": run_contract.sha256(root / f"{image_id}.jpg"),
-                    }
-                )
-            manifest = {"schema_version": 1, "purpose": "external", "rows": rows}
-            manifest["cohort_sha256"] = splitting.canonical_hash(manifest)
-            (root / "manifest.json").write_text(json.dumps(manifest))
-            manifest_hash = run_contract.sha256(root / "manifest.json")
-            policy = calibration.fit_policy(
-                np.array([0, 0, 1, 1]),
-                np.array([0.1, 0.2, 0.7, 0.9]),
-                image_ids=["fit-a", "fit-b", "fit-c", "fit-d"],
-                split_hash="frozen",
-            )
-            (model_root / "models/decision_policy.json").write_text(json.dumps(policy))
-            config = {"seed": 17}
-            record = {
-                "status": "completed",
-                "pipeline": "classical_logistic",
-                "config": config,
-                "config_sha256": splitting.canonical_hash(config),
-                "environment": {"software": {}},
-            }
-            (model_root / "run.json").write_text(json.dumps(record))
-            release = {
-                "schema_version": 1,
-                "runs": {"logistic-17": {"path": "fitted"}},
-                "files": {
-                    str(p.relative_to(root)): run_contract.sha256(p)
-                    for p in model_root.rglob("*")
-                    if p.is_file()
-                },
-            }
-            (root / "release.json").write_text(json.dumps(release))
-            release_hash = run_contract.sha256(root / "release.json")
-            audit = {
-                "clear": True,
-                "manifest_sha256": manifest_hash,
-                "exact": [],
-                "near": [],
-            }
-            (root / "audit.json").write_text(json.dumps(audit))
-            kwargs = dict(
-                root=root,
-                release_path=root / "release.json",
-                release_sha256=release_hash,
-                manifest_path=root / "manifest.json",
-                manifest_sha256=manifest_hash,
-                audit_path=root / "audit.json",
-                audit_sha256=run_contract.sha256(root / "audit.json"),
-                images_dir=root,
-                run_id="logistic-17",
-                output=root / "output",
+            from tests.external_fixtures import ReleaseFixture
+
+            fixture = ReleaseFixture(root)
+            release, manifest = fixture.release, fixture.manifest
+            kwargs = fixture.kwargs()
+            release_hash, manifest_hash = (
+                kwargs["release_sha256"],
+                kwargs["manifest_sha256"],
             )
             with patch.object(
                 external_inference,
                 "predict_raw",
-                return_value=np.array([0.1, 0.2, 0.7, 0.9]),
+                return_value=np.array([0.1, 0.2, 0.3, 0.7, 0.8, 0.9]),
             ):
                 external_inference.evaluate_run(**kwargs)
             validated = external_inference.validate_predictions(
@@ -197,7 +144,10 @@ class ExternalInferenceTests(unittest.TestCase):
                 expected_run_id="logistic-17",
                 audit_sha256=kwargs["audit_sha256"],
             )
-            self.assertEqual(validated.target.tolist(), [0, 0, 1, 1])
+            self.assertEqual(
+                validated.image_id.tolist(),
+                sorted(["001", "000", "NA", "NULL", "7", "mixed_A"]),
+            )
             with self.assertRaisesRegex(ValueError, "run identity"):
                 external_inference.validate_predictions(
                     root / "output",

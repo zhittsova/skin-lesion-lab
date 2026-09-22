@@ -1,0 +1,90 @@
+# External release contract v2
+
+A file list proves integrity only for the files it lists. External execution
+therefore requires a schema-2 release with explicit fitted identities and a
+complete inventory of its execution inputs. The caller supplies the reviewed
+release SHA-256 separately. Changing both the release and that digest creates
+a new release, so the review must establish its timing and intended use.
+
+## Required release fields
+
+| Field | Contract |
+| --- | --- |
+| `schema_version` | Integer `2`. Version 1 is inspection only. |
+| `files` | Canonical project-relative paths mapped to lowercase SHA-256 digests. Include every referenced `run.json` and every artifact in its ledger. |
+| `source_files` | Sorted, unique inventory returned by `src.external_release.source_files()`: every Python file under `src/`, plus `scripts/evaluate_external.py`. This deliberately includes more than the current import closure. |
+| `environment_path` | A listed JSON file containing `src.external_release.environment()`, captured in the intended runtime. |
+| `protocol` | Object with `path` and `sha256`, both bound to `files`. Preserve the reviewed protocol as a separate file. |
+| `comparison` | `{"families": ["logistic", "efficientnet-full-unweighted"], "seeds": [17, 42, 73]}`. |
+| `reporting` | Frozen `draws`, `seed`, `reference` and `metrics_version`. The primary protocol uses 2,000 draws, seed 2026, logistic reference and metric version 2. |
+| `runs` | Mapping from fitted run ID to the entry described below. Paths and family/seed pairs must be unique. |
+
+The inventory also requires `pyproject.toml`, `uv.lock`, `.python-version` and
+`docs/evaluation-protocol.md`. A run entry contains `path`, `run_sha256`, all
+fields returned by `run_contract.fitted_identity(record, training_metadata)`,
+and `estimator`, `policy`, `preprocessing` and `device`. Identity fields include
+run ID, pipeline, seed, architecture, pretrained initialization, training mode, loss strategy, positive loss
+weight, policy version and configuration digest. The validator derives those
+facts from the fitted record and deep training metadata before comparing them
+with the release. It then checks the trusted serialized estimator or checkpoint.
+
+For classical fits, `preprocessing` is
+`{"kind": "embedded", "artifact": "<run-path>/<estimator-path>"}`. The fitted
+logistic scaler and GMM standardization arrays live in that pickle. For deep
+fits, it is `{"kind": "transforms", "artifact":
+"<run-path>/results/deep_training_metadata.json"}`. The saved evaluation transform
+must match the executed transform. Estimator and policy paths must identify the
+artifacts required by the pipeline. A listed marker cannot replace them.
+
+The environment file records Python, platform, machine, package versions,
+selected process environment variables, Torch thread counts and OpenCV execution settings. Execution checks
+those values against the current process, and checks source bytes against both
+the running checkout and the import-time snapshot. Deep inference uses the saved
+seed, image size, dropout, batch size and MC pass count. It reconstructs weights
+without downloading pretrained weights and forces the deterministic evaluation
+behavior defined by the pinned source. Device is declared per run.
+
+Validate fitted runs with `run_contract.validate_run` before assembling a new
+release. Capture the source and runtime inventory, copy the reviewed protocol,
+construct each run entry from fitted facts, and hash every required file. Inspect
+the result with `external.verify_files(release_path, digest, root)` before
+external execution. The generated fixture in
+[`tests/external_fixtures.py`](../tests/external_fixtures.py) provides a complete
+small example, including artifacts that can actually be loaded. Its synthetic
+weights and outcomes have no model-quality interpretation.
+
+## Execution and reporting
+
+`evaluate_external.py run` accepts only v2. Gates run before prediction and again
+before completion. They check fitted partitions against external image IDs,
+release files, manifest, overlap audit and image bytes. Failed execution retains
+a failed record. Existing output directories are never reused.
+
+The report boundary requires exactly the two families and three seeds above,
+with no extra run directories. It verifies each saved result's release, audit,
+manifest, fitted identity, execution source and environment, then reconstructs
+its predictions and policy report from saved scores. It checks inputs and result
+files again before writing the report. CSV reads preserve lexical image, group
+and run IDs, including leading zeros and NA-like strings. Image IDs still follow
+the source identifier rules.
+
+New run records and report envelopes declare schema 2 and metric version 2.
+Prediction tables retain schema 1 for policy v1; policy v2 tables declare schema 2
+and include the finite input and ranking score columns. Saved policy application dispatches on policy version. Opt-in GMM v2 uses finite
+posterior log odds and saves a separate ranking score, as specified in
+[calibration v2](calibration-v2.md). Individual GMM and small-CNN fixtures can be
+scored, but they do not replace either family in the primary report matrix.
+
+## Historical inspection
+
+The original S11 release is v1. Use `inspect_legacy_release` with an explicit
+historical source snapshot and the original protocol to verify its listed bytes
+and all six actual mappings. This cannot authorize new inference. Saved-result
+reconstruction must explicitly select `legacy=True`, which retains policy-v1
+and metric-v1 semantics. The report command exposes that route only with
+`--legacy-source-root`, `--legacy-protocol` and a new `--output-report` path.
+It labels the output `legacy-v1-inspection` and `strict_release_accepted: false`.
+
+Keep the original release digest and reports. A later inspection cannot establish
+that omitted source was frozen before outcomes were seen. The
+[dated external status](external-status-2026-09-22.md) records that limitation.

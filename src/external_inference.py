@@ -10,11 +10,14 @@ import numpy as np
 import pandas as pd
 
 from src import (
+    bayes,
     calibration,
     classical,
     data,
     external,
+    external_release,
     features,
+    gmm,
     run_contract,
     splitting,
 )
@@ -34,9 +37,39 @@ def validate_audit(path, digest, manifest_sha256):
     return audit
 
 
+def validate_manifest(manifest):
+    content = {k: v for k, v in manifest.items() if k != "cohort_sha256"}
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("purpose") != "external"
+        or manifest.get("cohort_sha256") != splitting.canonical_hash(content)
+    ):
+        raise ValueError("invalid external manifest")
+    ids = []
+    for row in manifest["rows"]:
+        ids.append(splitting._identifier(row["image_id"], "image ID"))
+        if not isinstance(row.get("group_id"), str) or not row["group_id"].strip():
+            raise ValueError("missing external group identity")
+        if row["reason"] == "retained" and not row.get("image_sha256"):
+            raise ValueError("retained image lacks a hash")
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("empty or duplicated external membership")
+    return manifest
+
+
 def cache_dataset(dataset):
     """Reuse deterministic evaluation tensors across MC passes."""
     return [dataset[i] for i in range(len(dataset))]
+
+
+def validate_raw(record, raw, count):
+    expected = (
+        (record["config"]["mc_samples"], count)
+        if record["pipeline"].startswith("deep_")
+        else (count,)
+    )
+    if np.asarray(raw).shape != expected:
+        raise ValueError("saved scores differ from the fitted inference dimensions")
 
 
 def predict_raw(run_dir, record, image_ids, images_dir, device):
@@ -45,9 +78,20 @@ def predict_raw(run_dir, record, image_ids, images_dir, device):
     The caller must verify the release digest before loading its local pickle.
     """
     run_dir, images_dir = Path(run_dir), Path(images_dir)
-    if record["pipeline"] == "classical_logistic":
-        with (run_dir / "models/logistic_model.pkl").open("rb") as handle:
-            fitted = pickle.load(handle)["fitted"]
+    if record["pipeline"].startswith("classical_"):
+        with (run_dir / external_release.estimator_name(record)).open("rb") as handle:
+            saved = pickle.load(handle)
+        fitted = saved["fitted"]
+        family = record["pipeline"].removeprefix("classical_")
+        if saved.get("model_kind") != family:
+            raise ValueError("estimator model kind mismatch")
+        if family == "prevalence":
+            return classical.predict_prevalence(fitted, len(image_ids))
+        if (
+            family == "logistic"
+            and fitted["model"].random_state != record["config"]["seed"]
+        ):
+            raise ValueError("estimator fitted seed mismatch")
         x = features.compute_hsv_histograms_batch(
             [
                 data.load_image_hsv(
@@ -56,7 +100,17 @@ def predict_raw(run_dir, record, image_ids, images_dir, device):
                 for i in image_ids
             ]
         )
-        return classical.predict_logistic(fitted, x)
+        if family == "logistic":
+            return classical.predict_logistic(fitted, x)
+        if family != "gmm":
+            raise ValueError("unsupported classical estimator")
+        x = features.apply_standardization(x, saved["train_mean"], saved["train_std"])
+        likelihood = gmm.compute_class_likelihoods(fitted, x)
+        if record["config"].get("decision_policy_version", 1) == 2:
+            return bayes.compute_posterior_log_odds(likelihood, saved["class_priors"])
+        return bayes.compute_posterior_probabilities(likelihood, saved["class_priors"])[
+            :, 1
+        ]
     if record["pipeline"] not in {"deep_efficientnet_b0", "deep_small_cnn"}:
         raise ValueError("unsupported frozen model")
     import torch
@@ -78,7 +132,15 @@ def predict_raw(run_dir, record, image_ids, images_dir, device):
         map_location="cpu",
         weights_only=True,
     )
-    for key in ("architecture", "image_size", "dropout", "seed"):
+    for key in (
+        "architecture",
+        "image_size",
+        "dropout",
+        "seed",
+        "fine_tune_backbone",
+        "pretrained",
+        "loss_strategy",
+    ):
         if checkpoint[key] != config[key]:
             raise ValueError(f"checkpoint mismatch: {key}")
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -135,14 +197,11 @@ def evaluate_run(
     for path, digest in [(manifest_path, manifest_sha256), (audit_path, audit_sha256)]:
         if run_contract.sha256(Path(path)) != digest:
             raise ValueError("external input hash mismatch")
-    manifest = run_contract._json(Path(manifest_path))
-    content = {k: v for k, v in manifest.items() if k != "cohort_sha256"}
-    if manifest.get("purpose") != "external" or manifest[
-        "cohort_sha256"
-    ] != splitting.canonical_hash(content):
-        raise ValueError("invalid external manifest")
+    manifest = validate_manifest(run_contract._json(Path(manifest_path)))
     validate_audit(audit_path, audit_sha256, manifest_sha256)
     selected = release["runs"][run_id]
+    if selected["device"] != device:
+        raise ValueError("device differs from released execution configuration")
     run_dir = root / selected["path"]
     record = run_contract._json(run_dir / "run.json")
     if (
@@ -165,11 +224,21 @@ def evaluate_run(
             != row["image_sha256"]
         ):
             raise ValueError("external image hash mismatch")
-    if set(frame.image_id) & set(policy["fit"]["image_ids"]):
-        raise ValueError("external labels overlap policy fitting data")
+    for entry in release["runs"].values():
+        fitted_manifest = run_contract._json(
+            root / entry["path"] / "inputs/split-manifest.json"
+        )
+        if set(frame.image_id) & {
+            item for ids in fitted_manifest["partitions"].values() for item in ids
+        }:
+            raise ValueError("external labels overlap fitted partitions")
     output.mkdir(parents=True, exist_ok=False)
     status = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "metrics_version": 2,
+        "release_schema_version": 2,
+        "fitted_identity": selected,
+        "execution_environment": external_release.environment(),
         "status": "running",
         "run_id": run_id,
         "release_sha256": release_sha256,
@@ -177,7 +246,7 @@ def evaluate_run(
         "audit_sha256": audit_sha256,
         "cohort_sha256": manifest["cohort_sha256"],
         "device": "cpu" if record["pipeline"] == "classical_logistic" else device,
-        "source": run_contract._source_record()[0],
+        "source": {name: release["files"][name] for name in release["source_files"]},
         "software": {
             name: importlib.metadata.version(name)
             for name in (
@@ -199,6 +268,7 @@ def evaluate_run(
     start = time.monotonic()
     try:
         raw = predict_raw(run_dir, record, frame.image_id.tolist(), images_dir, device)
+        validate_raw(record, raw, len(frame))
         predictions = external.prediction_frame(frame, raw, policy, run_id=run_id)
         predictions["cohort_sha256"] = manifest["cohort_sha256"]
         predictions.to_csv(output / "predictions.csv", index=False)
@@ -208,9 +278,33 @@ def evaluate_run(
             frame.target.to_numpy(dtype=int),
             raw,
             variances=raw.var(axis=0, ddof=1) if raw.ndim == 2 else None,
+            metrics_version=2,
         )
         run_contract._write_json(output / "policy-report.json", report)
         external.verify_files(release_path, release_sha256, root)
+        for path, digest in [
+            (manifest_path, manifest_sha256),
+            (audit_path, audit_sha256),
+        ]:
+            external_release.check_hash(Path(path), digest)
+        for row in manifest["rows"]:
+            if row["image_sha256"]:
+                external_release.check_hash(
+                    images_dir / f"{row['image_id']}.jpg", row["image_sha256"]
+                )
+        pd.testing.assert_frame_equal(
+            run_contract._read_csv(output / "predictions.csv"),
+            predictions,
+            check_dtype=False,
+            check_exact=True,
+        )
+        if (
+            not np.array_equal(
+                np.load(output / "raw_scores.npy", allow_pickle=False), raw
+            )
+            or run_contract._json(output / "policy-report.json") != report
+        ):
+            raise ValueError("saved external scores or policy report changed")
         status.update(
             status="completed",
             runtime_seconds=time.monotonic() - start,
@@ -243,12 +337,39 @@ def validate_predictions(
     *,
     expected_run_id,
     audit_sha256,
+    legacy=False,
 ):
     """Reconstruct saved external predictions from raw scores and frozen policy."""
     path, root = Path(run_path), Path(root)
+    validate_manifest(manifest)
     status = run_contract._json(path / "run.json")
     if status.get("run_id") != expected_run_id:
         raise ValueError("external run identity mismatch")
+    version = 1 if legacy else 2
+    if (
+        release.get("schema_version") != version
+        or status.get("schema_version") != version
+    ):
+        raise ValueError("external release/result contract mismatch")
+    record, _ = external_release.run_facts(
+        root,
+        expected_run_id,
+        release["runs"][expected_run_id],
+        release["files"],
+        legacy=legacy,
+    )
+    if not legacy and (
+        status.get("fitted_identity") != release["runs"][expected_run_id]
+        or status.get("execution_environment")
+        != run_contract._json(root / release["environment_path"])
+        or status.get("metrics_version") != 2
+        or status.get("release_schema_version") != 2
+        or status.get("device") != release["runs"][expected_run_id]["device"]
+        or status.get("external_labels_used_for_fitting") is not False
+        or status.get("source")
+        != {name: release["files"][name] for name in release["source_files"]}
+    ):
+        raise ValueError("external execution identity mismatch")
     if status.get("audit_sha256") != audit_sha256:
         raise ValueError("external run audit mismatch")
     if (
@@ -273,9 +394,10 @@ def validate_predictions(
         .reset_index(drop=True)
     )
     raw = np.load(path / "raw_scores.npy", allow_pickle=False)
+    validate_raw(record, raw, len(cohort))
     expected = external.prediction_frame(cohort, raw, policy, run_id=run_id)
     expected["cohort_sha256"] = manifest["cohort_sha256"]
-    observed = pd.read_csv(path / "predictions.csv", float_precision="round_trip")
+    observed = run_contract._read_csv(path / "predictions.csv")
     try:
         pd.testing.assert_frame_equal(
             observed, expected, check_dtype=False, check_exact=True
@@ -289,7 +411,108 @@ def validate_predictions(
         cohort.target.to_numpy(dtype=int),
         raw,
         variances=raw.var(axis=0, ddof=1) if raw.ndim == 2 else None,
+        metrics_version=version,
     )
     if report != run_contract._json(path / "policy-report.json"):
         raise ValueError("external policy report differs from frozen policy")
     return observed
+
+
+def write_report(
+    *,
+    root,
+    release_path,
+    release_sha256,
+    manifest_path,
+    manifest_sha256,
+    audit_path,
+    audit_sha256,
+    runs_dir,
+    output_path=None,
+    legacy_source_root=None,
+    legacy_protocol_path=None,
+    draws=None,
+):
+    """Accept the complete matrix once, with a separate labeled legacy replay."""
+    root, runs_dir = Path(root), Path(runs_dir)
+    legacy = legacy_source_root is not None
+    if legacy and (output_path is None or legacy_protocol_path is None):
+        raise ValueError(
+            "legacy inspection requires historical source/protocol and new output"
+        )
+    output_path = (
+        Path(output_path) if output_path else runs_dir / "external-report.json"
+    )
+
+    def verify():
+        if legacy:
+            release = external_release.inspect_legacy_release(
+                release_path,
+                release_sha256,
+                root,
+                historical_source_root=legacy_source_root,
+                protocol_path=legacy_protocol_path,
+            )
+        else:
+            release = external.verify_files(release_path, release_sha256, root)
+        external_release.validate_matrix(release["runs"])
+        external_release.check_hash(Path(manifest_path), manifest_sha256)
+        validate_audit(audit_path, audit_sha256, manifest_sha256)
+        return release
+
+    release = verify()
+    if legacy:
+        draws = 2000 if draws is None else draws
+    else:
+        settings = release["reporting"]
+        if draws is not None and draws != settings["draws"]:
+            raise ValueError("report settings differ from the reviewed release")
+        draws = settings["draws"]
+    manifest = validate_manifest(run_contract._json(Path(manifest_path)))
+    if {p.name for p in runs_dir.iterdir() if p.is_dir()} != set(release["runs"]):
+        raise ValueError("missing or extra external run directories")
+    models, registry, observed_hashes = {}, {}, {}
+    for name, run in release["runs"].items():
+        path = runs_dir / name
+        before = {p.name: run_contract.sha256(p) for p in path.iterdir() if p.is_file()}
+        frame = validate_predictions(
+            path,
+            release,
+            release_sha256,
+            manifest,
+            manifest_sha256,
+            root,
+            expected_run_id=name,
+            audit_sha256=audit_sha256,
+            legacy=legacy,
+        )
+        models.setdefault(run["family"], {})[run["seed"]] = frame
+        registry[name] = {
+            "run_sha256": before["run.json"],
+            "prediction_sha256": before["predictions.csv"],
+        }
+        observed_hashes[path] = before
+    report = external.paired_report(
+        models, draws=draws, metrics_version=1 if legacy else 2
+    )
+    report.update(
+        schema_version=2,
+        contract="legacy-v1-inspection" if legacy else "strict-v2",
+        strict_release_accepted=not legacy,
+        release_sha256=release_sha256,
+        manifest_sha256=manifest_sha256,
+        audit_sha256=audit_sha256,
+        cohort_sha256=manifest["cohort_sha256"],
+        registry=registry,
+        exclusions=manifest["counts"],
+    )
+    verify()
+    for path, hashes in observed_hashes.items():
+        for name, digest in hashes.items():
+            external_release.check_hash(path / name, digest)
+    with output_path.open("x") as handle:
+        import json
+
+        json.dump(report, handle, indent=2, allow_nan=False)
+        handle.write("\n")
+    return report

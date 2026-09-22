@@ -16,14 +16,44 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+from src import calibration
+
 
 def compute_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
     return confusion_matrix(y_true, y_pred, labels=[0, 1])
 
 
 def compute_classification_metrics(
-    y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray
-) -> dict[str, float | int]:
+    y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray, *, metrics_version=2
+) -> dict[str, float | int | None]:
+    if type(metrics_version) is not int or metrics_version not in (1, 2):
+        raise ValueError("unsupported metrics version")
+    y_prob = calibration.probabilities(y_prob)
+    y_true = calibration.targets(y_true, len(y_prob))
+    y_pred = calibration.targets(y_pred, len(y_prob))
+    if metrics_version == 2:
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+
+        def ratio(numerator, denominator):
+            return float(numerator / denominator) if denominator else None
+
+        return {
+            "accuracy": float((tp + tn) / len(y_true)),
+            "precision": ratio(tp, tp + fp),
+            "recall": ratio(tp, tp + fn),
+            "sensitivity": ratio(tp, tp + fn),
+            "specificity": ratio(tn, tn + fp),
+            "f1": ratio(2 * tp, 2 * tp + fp + fn),
+            "roc_auc": float(roc_auc_score(y_true, y_prob))
+            if len(np.unique(y_true)) == 2
+            else None,
+            "brier_score": float(np.mean((y_prob - y_true) ** 2)),
+            "tp": int(tp),
+            "tn": int(tn),
+            "fp": int(fp),
+            "fn": int(fn),
+        }
+    # Bounded historical summary replay; never the default for a new report.
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
 
@@ -56,18 +86,25 @@ def compute_average_cost(
     y_true: np.ndarray, y_pred: np.ndarray, cost_fn: float, cost_fp: float
 ) -> float:
     """Average asymmetric cost with zero cost for correct decisions."""
+    y_true = calibration.targets(y_true, len(y_true))
+    y_pred = calibration.targets(y_pred, len(y_true))
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     _, fp, fn, _ = cm.ravel()
-    return float((cost_fp * fp + cost_fn * fn) / len(y_true))
+    return add_average_cost(
+        {"fp": int(fp), "fn": int(fn)}, len(y_true), cost_fn, cost_fp
+    )["average_cost"]
 
 
 def add_average_cost(
     metrics: Mapping[str, float | int], n_samples: int, cost_fn: float, cost_fp: float
 ) -> dict[str, float | int]:
     """Return a metrics copy with the asymmetric average cost attached."""
+    calibration.cost_threshold(cost_fn, cost_fp)
+    if n_samples <= 0:
+        raise ValueError("metrics require nonempty inputs")
     enriched = dict(metrics)
     enriched["average_cost"] = float(
-        (cost_fp * metrics["fp"] + cost_fn * metrics["fn"]) / n_samples
+        cost_fp * (metrics["fp"] / n_samples) + cost_fn * (metrics["fn"] / n_samples)
     )
     return enriched
 
@@ -91,28 +128,14 @@ def compute_pr_curve(
 def compute_calibration_curve(
     y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    bins = np.linspace(0, 1, n_bins + 1)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-
-    mean_probs = []
-    frequencies = []
-    bin_sizes = []
-
-    for i in range(len(bins) - 1):
-        mask = (y_prob >= bins[i]) & (y_prob < bins[i + 1])
-        if i == len(bins) - 2:
-            mask = (y_prob >= bins[i]) & (y_prob <= bins[i + 1])
-
-        if mask.sum() > 0:
-            mean_probs.append(y_prob[mask].mean())
-            frequencies.append(y_true[mask].mean())
-            bin_sizes.append(mask.sum())
-        else:
-            mean_probs.append(bin_centers[i])
-            frequencies.append(np.nan)
-            bin_sizes.append(0)
-
-    return np.array(mean_probs), np.array(frequencies), np.array(bin_sizes)
+    rows = calibration.probability_report(y_true, y_prob, n_bins)["reliability_bins"]
+    return (
+        np.array([row["mean_probability"] if row["count"] else np.nan for row in rows]),
+        np.array(
+            [row["positive_fraction"] if row["count"] else np.nan for row in rows]
+        ),
+        np.array([row["count"] for row in rows]),
+    )
 
 
 def compute_calibration_error(
@@ -135,12 +158,21 @@ def compute_calibration_error(
 def print_evaluation_summary(
     metrics: Mapping[str, float | int], split_name: str = "Test"
 ) -> None:
-    auc_text = "nan" if np.isnan(metrics["roc_auc"]) else f"{metrics['roc_auc']:.4f}"
-    text = f"""
+    def formatted(key):
+        return format_metric(metrics[key])
+
+    print(f"""
 {split_name} results
 confusion matrix: TP={metrics["tp"]}, TN={metrics["tn"]}, FP={metrics["fp"]}, FN={metrics["fn"]}
-accuracy={metrics["accuracy"]:.4f}, precision={metrics["precision"]:.4f}, recall/sens={metrics["recall"]:.4f}
-specificity={metrics["specificity"]:.4f}, f1={metrics["f1"]:.4f}
-roc_auc={auc_text}, brier={metrics["brier_score"]:.4f}
-"""
-    print(text)
+accuracy={formatted("accuracy")}, precision={formatted("precision")}, recall/sens={formatted("recall")}
+specificity={formatted("specificity")}, f1={formatted("f1")}
+roc_auc={formatted("roc_auc")}, brier={formatted("brier_score")}
+""")
+
+
+def format_metric(value, digits=4):
+    return (
+        "undefined"
+        if value is None or not np.isfinite(value)
+        else f"{value:.{digits}f}"
+    )

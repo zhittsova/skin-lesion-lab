@@ -14,13 +14,16 @@ BCC, SCC, actinic keratosis and unknown diagnoses with recorded reasons. See the
 [source catalog](../catalog/sources.json) for identity, permissions and hashes.
 Dataset images and row-level metadata stay local.
 
-Before accessing external labels, record the protocol and a trusted release
-manifest. Its `files` map pins every fitted run record and artifact plus the
-inference source files to SHA-256 digests. Its `runs` map identifies each run's
-project-relative `path`, model `family` and `seed`. Validate fitted runs with
-`src.run_contract.validate_run` before freezing. Preserve the release file digest
-separately; changing the manifest and the supplied digest together constitutes a
-new release, not verification of the old release.
+For new execution, review and record the protocol and a complete
+[schema-2 release](external-release-v2.md) before accessing external outcomes.
+The gate verifies fitted records, estimators, policies, preprocessing, executed
+source and runtime inputs. Preserve the trusted release digest separately.
+Changing the release and supplied digest together creates a new release.
+
+The original S11 release uses schema 1 and omits some execution dependencies.
+It supports explicitly labeled historical inspection, not strict acceptance or
+new inference. Read the [dated status note](external-status-2026-09-22.md) before
+using its provenance claim.
 
 `src.external.hiba_manifest(metadata, images)` builds the external membership
 and exclusion record without allocating development splits. It connects all

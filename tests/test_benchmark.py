@@ -1,6 +1,8 @@
 """Independent arithmetic and cluster-resampling oracles for the benchmark."""
 
+import json
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -36,7 +38,6 @@ class BenchmarkTests(unittest.TestCase):
     def test_invalid_inputs_and_undefined_precision(self):
         for f in [
             fixture().iloc[:0],
-            fixture().iloc[:2],
             fixture().assign(prob_melanoma=np.nan),
             fixture().assign(prediction=2),
         ]:
@@ -45,6 +46,99 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIsNone(
             benchmark.endpoints(fixture().assign(prediction=0))["precision"]
         )
+
+    def test_current_endpoints_preserve_defined_zero_and_one_class_nulls(self):
+        f = fixture()
+        for frame, expected in (
+            (
+                f.assign(prediction=0),
+                {
+                    "precision": None,
+                    "sensitivity": 0.0,
+                    "specificity": 1.0,
+                    "average_cost": 5.0,
+                },
+            ),
+            (
+                f.iloc[:2].assign(prediction=0),
+                {
+                    "precision": None,
+                    "sensitivity": None,
+                    "specificity": 1.0,
+                    "average_cost": 0.0,
+                },
+            ),
+            (
+                f.iloc[2:].assign(prediction=0),
+                {
+                    "precision": None,
+                    "sensitivity": 0.0,
+                    "specificity": None,
+                    "average_cost": 10.0,
+                },
+            ),
+            (
+                f.iloc[:2].assign(prediction=1),
+                {
+                    "precision": 0.0,
+                    "sensitivity": None,
+                    "specificity": 0.0,
+                    "average_cost": 1.0,
+                },
+            ),
+        ):
+            with self.subTest(
+                targets=frame.target.tolist(), decisions=frame.prediction.tolist()
+            ):
+                got = benchmark.endpoints(frame)
+                for name, value in expected.items():
+                    self.assertEqual(got[name], value)
+                if frame.target.nunique() == 1:
+                    for name in ("roc_auc", "average_precision", "pr_auc"):
+                        self.assertIsNone(got[name])
+                self.assertAlmostEqual(
+                    got["brier_score"],
+                    sum((p - y) ** 2 for p, y in zip(frame.prob_melanoma, frame.target))
+                    / len(frame),
+                )
+                json.dumps(got, allow_nan=False)
+
+    def test_one_class_draws_count_nulls_without_changing_seed_mapping(self):
+        f = fixture()
+        models = {"a": {s: f for s in (17, 42, 73)}, "b": {s: f for s in (17, 42, 73)}}
+        with patch("src.benchmark.group_draws", return_value=iter([np.array([0, 1])])):
+            report = benchmark.paired_report(models, reference="b", draws=1)
+        self.assertEqual(report["metrics_version"], 2)
+        self.assertEqual(report["models"]["a"]["roc_auc"]["undefined_draws"], 1)
+        self.assertIsNone(report["models"]["a"]["roc_auc"]["interval"])
+        self.assertEqual(report["models"]["a"]["specificity"]["undefined_draws"], 0)
+        self.assertEqual(report["models"]["a"]["specificity"]["interval"], [1, 1])
+        self.assertEqual(report["differences"]["a"]["roc_auc"]["undefined_draws"], 1)
+        self.assertEqual(report["differences"]["a"]["specificity"]["interval"], [0, 0])
+        json.dumps(report, allow_nan=False)
+
+    def test_legacy_endpoint_replay_is_explicit(self):
+        current = benchmark.endpoints(fixture().assign(prediction=0))
+        legacy = benchmark.endpoints(fixture().assign(prediction=0), metrics_version=1)
+        self.assertIsNone(current["precision"])
+        self.assertIsNone(legacy["precision"])
+        self.assertEqual(legacy["roc_auc"], 0.75)
+        with self.assertRaises(ValueError):
+            benchmark.endpoints(fixture().iloc[:2], metrics_version=1)
+        with self.assertRaises(ValueError):
+            benchmark.endpoints(fixture(), metrics_version=3)
+        self.assertEqual(benchmark.report_metrics_version({}), 1)
+        self.assertEqual(benchmark.report_metrics_version({"metrics_version": 2}), 2)
+        with self.assertRaises(ValueError):
+            benchmark.report_metrics_version({"metrics_version": True})
+        replay = benchmark.paired_report(
+            {"a": {s: fixture() for s in (17, 42, 73)}},
+            reference="a",
+            draws=2,
+            metrics_version=1,
+        )
+        self.assertEqual(replay["metrics_version"], 1)
+        self.assertEqual(replay["models"]["a"]["roc_auc"]["estimate"], 0.75)
 
     def test_cluster_draws_keep_all_images_with_multiplicity(self):
         f = fixture()
