@@ -36,6 +36,25 @@ PREDICTION_COLUMNS = (
     "prob_melanoma",
     "prediction",
 )
+IDENTITY_COLUMNS = (
+    "run_id",
+    "model_key",
+    "role",
+    "split_hash",
+    "image_id",
+    "lesion_id",
+    "group_id",
+)
+
+
+def _read_csv(path: Path) -> pd.DataFrame:
+    """Read prediction numbers accurately while keeping IDs lexical."""
+    return pd.read_csv(
+        path,
+        dtype={name: str for name in IDENTITY_COLUMNS},
+        keep_default_na=False,
+        float_precision="round_trip",
+    )
 
 
 def sha256(path: Path) -> str:
@@ -252,7 +271,7 @@ def _check_deep_arrays(path: Path, record: dict, predictions: pd.DataFrame) -> N
         raise ValueError("deep array content disagrees with predictions")
     for role, mc in (("calibration", cal_mc), ("development", dev_mc)):
         file = path / "results" / "tables" / f"{architecture}_predictions_{role}.csv"
-        producer = pd.read_csv(file)
+        producer = _read_csv(file)
         required = {"predictive_std", "predictive_entropy", "mutual_information"}
         if not required.issubset(producer.columns):
             raise ValueError("missing deep uncertainty columns")
@@ -411,7 +430,7 @@ class RunRecord:
         for role, file in prediction_files.items():
             if role not in splitting.ROLES or not Path(file).is_relative_to(self.path):
                 raise ValueError("invalid prediction artifact")
-            frame = pd.read_csv(file)
+            frame = _read_csv(file)
             normalized = _normalize_predictions(
                 frame,
                 role=role,
@@ -533,7 +552,7 @@ def validate_run(run_dir: Path, *, input_paths: dict[str, Path] | None = None):
         != manifest["split_hash"]
     ):
         raise ValueError("invalid split manifest content hash")
-    frame = pd.read_csv(path / "predictions.csv")
+    frame = _read_csv(path / "predictions.csv")
     if tuple(frame.columns) != PREDICTION_COLUMNS:
         raise ValueError("prediction schema mismatch")
     roles = record["prediction_roles"]
@@ -553,7 +572,7 @@ def validate_run(run_dir: Path, *, input_paths: dict[str, Path] | None = None):
         producer_name = record["prediction_files"][role]
         if producer_name not in expected_files:
             raise ValueError("missing producer prediction artifact")
-        producer = pd.read_csv(path / producer_name)
+        producer = _read_csv(path / producer_name)
         if not set(PREDICTION_COLUMNS).issubset(producer.columns):
             raise ValueError("producer prediction schema mismatch")
         if not producer[list(PREDICTION_COLUMNS)].equals(subset):
@@ -635,7 +654,7 @@ def recompute_report(run_dir: Path):
             / "tables"
             / f"{architecture}_predictions_development.csv"
         )
-        frame = pd.read_csv(file)
+        frame = _read_csv(file)
         if not {"predictive_std", "mutual_information"}.issubset(frame.columns):
             raise ValueError("missing uncertainty prediction columns")
         result["mc_dropout_uncertainty"] = {

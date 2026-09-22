@@ -36,7 +36,12 @@ class SharedManifestSmokeTests(unittest.TestCase):
             rng = np.random.default_rng(123)
             for label in (0, 1):
                 for i in range(20):
-                    image_id = f"I{label}_{i:03d}"
+                    image_id = {
+                        (0, 0): "001",
+                        (0, 1): "NA",
+                        (1, 0): "000",
+                        (1, 1): "NULL",
+                    }.get((label, i), f"I{label}_{i:03d}")
                     pixels = rng.integers(0, 256, size=(16, 16, 3), dtype=np.uint8)
                     Image.fromarray(pixels).save(images / f"{image_id}.jpg")
                     rows.append(
@@ -127,15 +132,41 @@ class SharedManifestSmokeTests(unittest.TestCase):
             ):
                 train_deep_pipeline.main()
             deep_results = deep_root / "deep-fixture"
+            training = json.loads(
+                (deep_results / "results" / "deep_training_metadata.json").read_text()
+            )
+            checkpoint_path = deep_results / training["checkpoint"]["path"]
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=True
+            )
+            self.assertEqual(
+                training["checkpoint"]["sha256"], run_contract.sha256(checkpoint_path)
+            )
+            self.assertEqual(training["randomness"]["seed"], 73)
+            self.assertEqual(training["device"], "cpu")
+            self.assertEqual(training["loss"]["strategy"], "unweighted")
+            self.assertIsNone(training["loss"]["pos_weight"])
+            self.assertIsNone(training["weights"]["enum"])
+            self.assertEqual(checkpoint["seed"], training["randomness"]["seed"])
+            self.assertEqual(checkpoint["epoch"], training["selection"]["epoch"])
+            self.assertEqual(
+                checkpoint["selection_auc"], training["selection"]["score"]
+            )
+            self.assertEqual(checkpoint["split_hash"], manifest["split_hash"])
             for location, filename in (
                 (classical, "predictions_development.csv"),
                 (deep_results, "small_cnn_predictions_development.csv"),
             ):
-                predictions = pd.read_csv(location / "results" / "tables" / filename)
+                predictions = run_contract._read_csv(
+                    location / "results" / "tables" / filename
+                )
                 self.assertEqual(
                     predictions.image_id.tolist(), manifest["partitions"]["development"]
                 )
                 self.assertTrue(predictions.group_id.notna().all())
+                self.assertTrue(
+                    predictions.image_id.map(lambda value: isinstance(value, str)).all()
+                )
                 self.assertIn(
                     "prediction_map" if location == classical else "predictive_std",
                     predictions.columns,
@@ -184,6 +215,21 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         delta=1e-6,
                     )
                 if run == deep_results:
+                    self.assertIn(
+                        "results/deep_training_metadata.json", record["artifacts"]
+                    )
+                    self.assertEqual(
+                        record["artifacts"][training["checkpoint"]["path"]],
+                        training["checkpoint"]["sha256"],
+                    )
+                    selected = next(
+                        row
+                        for row in reported["training"]["history"]
+                        if row["epoch"] == training["selection"]["epoch"]
+                    )
+                    self.assertEqual(
+                        selected["selection_auc"], training["selection"]["score"]
+                    )
                     for metric, value in recomputed["mc_dropout_uncertainty"].items():
                         self.assertAlmostEqual(
                             value, reported["mc_dropout_uncertainty"][metric]
@@ -195,7 +241,7 @@ class SharedManifestSmokeTests(unittest.TestCase):
                 / "small_cnn_predictions_development.csv"
             )
             original = producer.read_bytes()
-            altered = pd.read_csv(producer)
+            altered = run_contract._read_csv(producer)
             altered.loc[0, "predictive_std"] += 0.2
             altered.to_csv(producer, index=False)
             record_path = deep_results / "run.json"

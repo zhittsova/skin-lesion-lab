@@ -26,6 +26,7 @@ from src import (
 )
 from torch import nn
 from torch.utils.data import DataLoader
+from torchvision.models import EfficientNet_B0_Weights
 
 TOKENS = {
     "surface": "#FCFCFD",
@@ -84,6 +85,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mc-samples", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--device",
+        choices=["cpu", "auto", "cuda", "mps"],
+        default="cpu",
+        help="Training device; CPU is the reproducible local baseline.",
+    )
+    parser.add_argument(
+        "--loss-strategy",
+        choices=["unweighted", "pos_weight"],
+        default="unweighted",
+        help="Unweighted BCE is primary; training-count weighting is an ablation.",
+    )
     parser.add_argument("--cost-fn", type=float, default=10.0)
     parser.add_argument("--cost-fp", type=float, default=1.0)
     return parser.parse_args()
@@ -98,6 +111,7 @@ def make_loader(
     batch_size: int,
     train: bool,
     num_workers: int,
+    seed: int = 42,
 ) -> DataLoader:
     dataset = deep.SkinLesionImageDataset(
         image_ids=image_ids[indices],
@@ -111,7 +125,48 @@ def make_loader(
         shuffle=train,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        worker_init_fn=deep.seed_worker,
+        generator=torch.Generator().manual_seed(seed),
     )
+
+
+def validate_training_config(args) -> None:
+    """Reject settings that cannot represent a valid S06 training run."""
+    if args.architecture not in {"small_cnn", "efficientnet_b0"}:
+        raise ValueError("invalid architecture")
+    if args.architecture == "small_cnn" and (
+        args.pretrained or args.fine_tune_backbone
+    ):
+        raise ValueError("small_cnn has no pretrained or backbone fine-tuning mode")
+    if (
+        args.architecture == "efficientnet_b0"
+        and not args.pretrained
+        and not args.fine_tune_backbone
+    ):
+        raise ValueError("a frozen EfficientNet backbone requires pretrained weights")
+    if args.image_size < 32 or args.batch_size <= 0 or args.epochs <= 0:
+        raise ValueError("image_size, batch_size, and epochs must permit a checkpoint")
+    if args.num_workers < 0 or not 0 <= args.seed <= 2**32 - 4 or args.mc_samples < 2:
+        raise ValueError(
+            "num_workers must be nonnegative; seed must fit loader policy; mc_samples must be >= 2"
+        )
+    if not 0 <= args.dropout < 1:
+        raise ValueError("dropout must be in [0, 1)")
+    if not np.isfinite(args.learning_rate) or args.learning_rate <= 0:
+        raise ValueError("learning_rate must be finite and positive")
+    if not np.isfinite(args.weight_decay) or args.weight_decay < 0:
+        raise ValueError("weight_decay must be finite and nonnegative")
+    if (
+        not np.isfinite(args.cost_fn)
+        or not np.isfinite(args.cost_fp)
+        or args.cost_fn <= 0
+        or args.cost_fp <= 0
+    ):
+        raise ValueError("costs must be finite and positive")
+    if getattr(args, "loss_strategy", "unweighted") not in {"unweighted", "pos_weight"}:
+        raise ValueError("invalid loss_strategy")
+    if getattr(args, "device", "cpu") not in {"cpu", "auto", "cuda", "mps"}:
+        raise ValueError("invalid device")
 
 
 def metrics_for_threshold(
@@ -371,10 +426,7 @@ def main() -> None:
 
 
 def _run(args) -> None:
-    if args.epochs <= 0:
-        raise ValueError(
-            "epochs must be positive; a checkpoint must be selected this run"
-        )
+    validate_training_config(args)
     start_time = time.time()
     deep.set_seed(args.seed)
 
@@ -410,6 +462,7 @@ def _run(args) -> None:
         args.batch_size,
         train=True,
         num_workers=args.num_workers,
+        seed=args.seed,
     )
     selection_loader = make_loader(
         image_ids,
@@ -420,6 +473,7 @@ def _run(args) -> None:
         args.batch_size,
         train=False,
         num_workers=args.num_workers,
+        seed=args.seed + 1,
     )
     calibration_loader = make_loader(
         image_ids,
@@ -430,6 +484,7 @@ def _run(args) -> None:
         args.batch_size,
         train=False,
         num_workers=args.num_workers,
+        seed=args.seed + 2,
     )
     development_loader = make_loader(
         image_ids,
@@ -440,10 +495,11 @@ def _run(args) -> None:
         args.batch_size,
         train=False,
         num_workers=args.num_workers,
+        seed=args.seed + 3,
     )
 
     print("\n3. training")
-    device = deep.get_default_device()
+    device = deep.get_default_device(getattr(args, "device", "cpu"))
     print(f"device: {device}")
     model = deep.build_model(
         architecture=args.architecture,
@@ -453,10 +509,17 @@ def _run(args) -> None:
     ).to(device)
 
     y_train = labels[split_indices["train"]]
-    pos_weight = deep.compute_pos_weight(y_train)
-    criterion = nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([pos_weight], dtype=torch.float32, device=device)
-    )
+    loss_strategy = getattr(args, "loss_strategy", "unweighted")
+    if loss_strategy == "pos_weight":
+        if set(np.unique(y_train)) != {0, 1}:
+            raise ValueError("pos_weight needs both training classes")
+        pos_weight = deep.compute_pos_weight(y_train)
+        criterion = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([pos_weight], dtype=torch.float32, device=device)
+        )
+    else:
+        pos_weight = None
+        criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(
         (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=args.learning_rate,
@@ -485,9 +548,11 @@ def _run(args) -> None:
             cost_fn=args.cost_fn,
             cost_fp=args.cost_fp,
         )
+        if not np.isfinite(train_loss):
+            raise ValueError("non-finite training loss")
+        if not np.isfinite(selection_loss):
+            raise ValueError("non-finite checkpoint selection loss")
         score = float(selection_metrics["roc_auc"])
-        if np.isnan(score):
-            score = -selection_loss
 
         history_row = {
             "epoch": epoch,
@@ -516,6 +581,14 @@ def _run(args) -> None:
                     "dropout": args.dropout,
                     "pretrained": args.pretrained,
                     "fine_tune_backbone": args.fine_tune_backbone,
+                    "weights_enum": (
+                        "EfficientNet_B0_Weights.IMAGENET1K_V1"
+                        if args.architecture == "efficientnet_b0" and args.pretrained
+                        else None
+                    ),
+                    "loss_strategy": loss_strategy,
+                    "pos_weight": pos_weight,
+                    "seed": args.seed,
                     "epoch": epoch,
                     "selection_auc": selection_metrics["roc_auc"],
                 },
@@ -525,13 +598,87 @@ def _run(args) -> None:
 
     if not checkpoint_selected:
         raise ValueError("no finite checkpoint selected this run")
-    checkpoint = torch.load(best_checkpoint, map_location=device)
+    checkpoint = torch.load(best_checkpoint, map_location=device, weights_only=True)
     if any(
         checkpoint.get(key) != split_report[key]
         for key in ("split_hash", "cohort_hash")
     ):
         raise ValueError("checkpoint does not match the current split manifest")
+    for key, expected in {
+        "architecture": args.architecture,
+        "image_size": args.image_size,
+        "dropout": args.dropout,
+        "pretrained": args.pretrained,
+        "fine_tune_backbone": args.fine_tune_backbone,
+        "loss_strategy": loss_strategy,
+        "pos_weight": pos_weight,
+        "seed": args.seed,
+    }.items():
+        if checkpoint.get(key) != expected:
+            raise ValueError(f"checkpoint configuration mismatch: {key}")
     model.load_state_dict(checkpoint["model_state_dict"])
+
+    if args.architecture == "small_cnn":
+        mode = "small_cnn_from_scratch"
+    elif args.fine_tune_backbone:
+        mode = (
+            "pretrained_full_fine_tune" if args.pretrained else "random_full_training"
+        )
+    else:
+        mode = "pretrained_head_training"
+    weight_enum = (
+        "EfficientNet_B0_Weights.IMAGENET1K_V1"
+        if args.architecture == "efficientnet_b0" and args.pretrained
+        else None
+    )
+    training_metadata = {
+        "architecture": args.architecture,
+        "mode": mode,
+        "weights": {
+            "enum": weight_enum,
+            "url": EfficientNet_B0_Weights.IMAGENET1K_V1.url if weight_enum else None,
+            "source": "torchvision" if weight_enum else None,
+        },
+        "transforms": {
+            "train": repr(deep.build_transforms(args.image_size, train=True)),
+            "eval": repr(deep.build_transforms(args.image_size, train=False)),
+            "normalization": {
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+            },
+        },
+        "randomness": {
+            "seed": args.seed,
+            "global_rngs": ["python", "numpy", "torch", "torch.cuda_if_available"],
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "worker_policy": "DataLoader torch seed; NumPy and Python from torch.initial_seed",
+            "loader_seeds": {
+                "train": args.seed,
+                "selection": args.seed + 1,
+                "calibration": args.seed + 2,
+                "development": args.seed + 3,
+            },
+        },
+        "device": str(device),
+        "loss": {"strategy": loss_strategy, "pos_weight": pos_weight},
+        "selection": {
+            "metric": "selection_roc_auc",
+            "direction": "max",
+            "tie": "earliest_epoch",
+            "epoch": checkpoint["epoch"],
+            "score": checkpoint["selection_auc"],
+        },
+        "checkpoint": {
+            "path": f"models/{best_checkpoint.name}",
+            "sha256": run_contract.sha256(best_checkpoint),
+            "reload_cpu_tolerance": {"atol": 1e-6, "rtol": 0},
+        },
+    }
+    reporting.save_json(
+        training_metadata, args.results_dir / "deep_training_metadata.json"
+    )
 
     print("\n4. MC Dropout inference")
     calibration_mc = deep.predict_with_mc_dropout(
