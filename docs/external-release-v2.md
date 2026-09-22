@@ -48,10 +48,33 @@ fits, it is `{"kind": "transforms", "artifact":
 must match the executed transform. Estimator and policy paths must identify the
 artifacts required by the pipeline. A listed marker cannot replace them.
 
-The environment file records Python, platform, machine, package versions,
-selected process environment variables, Torch thread counts and OpenCV execution settings. Execution checks
-those values against the current process, and checks source bytes against both
-the running checkout and the import-time snapshot. Deep inference uses the saved
+The environment file has its own `schema_version: 2`. It records Python,
+platform, machine, selected process variables, Torch thread counts and OpenCV
+settings. Its `software` map contains the active installed dependency closure
+of the ten direct runtime requirements in `pyproject.toml`: NumPy, pandas,
+scikit-learn, Torch, torchvision, Pillow, headless OpenCV, Matplotlib, seaborn
+and tqdm. The closure follows each installed distribution's requirements,
+including nested requirements and applicable platform or extra markers. It
+includes numerical dependencies such as SciPy, joblib, threadpoolctl and
+SymPy. Names are canonical lowercase distribution names, sorted in the JSON
+map. Developer and notebook tools are outside this boundary unless a runtime
+requirement brings them in.
+
+Capture and verify the environment in the intended runtime. Linux uses the
+project's CPU Torch wheels, whose installed requirements can differ from the
+host's. Resolution reads installed metadata only; it does not consult an index.
+Missing metadata, an incompatible installed requirement, an omitted package or
+any recorded version difference rejects strict execution. The release also
+hashes `uv.lock`, but that hash alone does not prove what is installed. Earlier
+environment files without version 2, including the incomplete strict snapshots,
+reject and must be captured again for a new reviewed release. This does not
+upgrade the original schema-1 artifact: its explicit historical inspection path
+still checks its original bytes without authorizing inference.
+
+Execution compares the captured environment with the current process and checks
+source bytes against both the running checkout and the import-time snapshot.
+This binds the declared runtime inputs; it does not promise bitwise equality
+across platforms or hardware. Deep inference uses the saved
 seed, image size, dropout, batch size and MC pass count. It reconstructs weights
 without downloading pretrained weights and forces the deterministic evaluation
 behavior defined by the pinned source. Device is declared per run.
