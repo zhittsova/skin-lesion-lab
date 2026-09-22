@@ -45,10 +45,10 @@ def independent_metrics(targets, probabilities, decisions, cost_fn, cost_fp):
             )
         )
         if len(positive) and len(negative)
-        else math.nan
+        else None
     )
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
+    precision = tp / (tp + fp) if tp + fp else None
+    recall = tp / (tp + fn) if tp + fn else None
     return {
         "tp": tp,
         "tn": tn,
@@ -58,10 +58,8 @@ def independent_metrics(targets, probabilities, decisions, cost_fn, cost_fp):
         "precision": precision,
         "recall": recall,
         "sensitivity": recall,
-        "specificity": tn / (tn + fp) if tn + fp else 0.0,
-        "f1": 2 * precision * recall / (precision + recall)
-        if precision + recall
-        else 0.0,
+        "specificity": tn / (tn + fp) if tn + fp else None,
+        "f1": 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else None,
         "roc_auc": auc,
         "brier_score": float(np.mean((p - y) ** 2)),
         "average_cost": (cost_fn * fn + cost_fp * fp) / len(y),
@@ -106,7 +104,12 @@ def make_cohort(root: Path) -> tuple[Path, Path]:
     rng = np.random.default_rng(123)
     for label in (0, 1):
         for index in range(20):
-            image_id = f"S{label}_{index:03d}"
+            image_id = {
+                (0, 0): "001",
+                (0, 1): "NA",
+                (1, 0): "000",
+                (1, 1): "NULL",
+            }.get((label, index), f"S{label}_{index:03d}")
             pixels = rng.integers(0, 256, size=(16, 16, 3), dtype=np.uint8)
             Image.fromarray(pixels).save(images / f"{image_id}.jpg")
             rows.append(
@@ -130,7 +133,11 @@ def check_run(root: Path, run_id: str, manifest: dict, *, deep: bool) -> dict:
         raise AssertionError(f"{run_id}: wrong split hash")
     summary_name = "small_cnn_metrics_summary.json" if deep else "metrics_summary.json"
     summary = json.loads((run_dir / "results" / summary_name).read_text())
-    predictions = pd.read_csv(run_dir / "predictions.csv", float_precision="round_trip")
+    if summary.get("metrics_version") != 2:
+        raise AssertionError(f"{run_id}: new run requires metrics version 2")
+    from src.run_contract import _read_csv
+
+    predictions = _read_csv(run_dir / "predictions.csv")
     by_id = {row["image_id"]: row["target"] for row in manifest["rows"]}
     checked = 0
     for role, points in summary["metrics"].items():
@@ -159,7 +166,13 @@ def check_run(root: Path, run_id: str, manifest: dict, *, deep: bool) -> dict:
                 summary["cost_matrix"]["false_positive"],
             )
             for metric, value in observed.items():
-                if not math.isclose(value, saved[metric], rel_tol=1e-7, abs_tol=1e-8):
+                if (value is None or saved[metric] is None) and value != saved[metric]:
+                    raise AssertionError(
+                        f"{run_id}: {role}/{point}/{metric}: {value} != {saved[metric]}"
+                    )
+                if value is not None and not math.isclose(
+                    value, saved[metric], rel_tol=1e-7, abs_tol=1e-8
+                ):
                     raise AssertionError(
                         f"{run_id}: {role}/{point}/{metric}: {value} != {saved[metric]}"
                     )
@@ -271,7 +284,7 @@ def execute(root: Path) -> dict:
     finally:
         stale.write_bytes(original)
     malformed = root / "malformed.csv"
-    bad = pd.read_csv(metadata)
+    bad = pd.read_csv(metadata, keep_default_na=False, dtype=str)
     bad.loc[0, "dx"] = "unknown-diagnosis"
     bad.to_csv(malformed, index=False)
     run_cli(
@@ -300,6 +313,26 @@ def execute(root: Path) -> dict:
         or malformed_record["failure"]["reason"] != "invalid_cohort"
     ):
         raise AssertionError("malformed cohort left no diagnostic run record")
+    invalid_ids = root / "invalid-ids.csv"
+    invalid = pd.read_csv(metadata, keep_default_na=False, dtype=str)
+    invalid.loc[0, "image_id"] = ""
+    invalid.to_csv(invalid_ids, index=False)
+    run_cli(
+        root,
+        "missing-image-id",
+        [
+            "freeze_splits.py",
+            "--source",
+            "ham10000",
+            "--metadata-path",
+            str(invalid_ids),
+            "--images-dir",
+            str(images),
+            "--split-manifest",
+            str(root / "invalid-manifest.json"),
+        ],
+        success=False,
+    )
     interrupt_code = (
         "import train_pipeline; from unittest.mock import patch; "
         "patch.object(train_pipeline, '_run', side_effect=KeyboardInterrupt("
@@ -350,7 +383,7 @@ def execute(root: Path) -> dict:
         or recovered["status"] != "completed"
     ):
         raise AssertionError("failed-run recovery did not create a completed new run")
-    return {"split_hash": manifest["split_hash"], "runs": results, "failure_cases": 3}
+    return {"split_hash": manifest["split_hash"], "runs": results, "failure_cases": 4}
 
 
 def main() -> None:
