@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "device": "cuda:0",
+  "workload": "efficientnet_full",
+  "concurrency_levels": [1, 2, 3],
+  "repeats": 2,
+  "batches": 32,
+  "dataset_batches": 4,
+  "threads_per_job": 1,
+  "loader_workers": 0,
+  "allow_cpu_oversubscription": true,
+  "paid_budget": 0,
+  "pilot_budget_seconds": 1200,
+  "group_budget_seconds": 240,
+  "ready_budget_seconds": 90,
+  "reserve_host_bytes": 2147483648,
+  "reserve_device_bytes": 1073741824,
+  "reserve_disk_bytes": 4294967296
+}

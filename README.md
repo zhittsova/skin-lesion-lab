@@ -18,7 +18,7 @@ that accepted result from later diagnostic work and future methods.
 
 ## Run
 
-Use uv 0.12.13 and Python 3.14.7. Direct dependencies have exact version pins;
+Use uv 0.12.17 and Python 3.14.7. Direct dependencies have exact version pins;
 `uv.lock` records the full dependency resolution. Linux installs use the
 PyTorch CPU wheel index, so the default environment does not install CUDA.
 The checked platforms are macOS arm64 and Linux arm64/x86-64 in CI or Docker.

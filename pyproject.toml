@@ -50,7 +50,7 @@ select = [
 ]
 
 [tool.uv]
-required-version = "==0.12.13"
+required-version = "==0.12.17"
 add-bounds = "exact"
 
 # PyPI's Linux torch wheels include CUDA dependencies. Use the CPU builds there.

@@ -12,6 +12,8 @@ from torch.utils.data import Dataset
 from torchvision import models, transforms
 from torchvision.models import EfficientNet_B0_Weights
 
+from src.image_cache import ResizedImageCache
+
 
 class SkinLesionImageDataset(Dataset):
     """Image dataset backed by the local ISIC image folder."""
@@ -22,11 +24,24 @@ class SkinLesionImageDataset(Dataset):
         labels: Sequence[int],
         images_dir: Path,
         transform: transforms.Compose | None = None,
+        resized_cache: ResizedImageCache | None = None,
     ) -> None:
         self.image_ids = list(image_ids)
         self.labels = np.asarray(labels, dtype=np.float32)
         self.images_dir = Path(images_dir)
         self.transform = transform
+        if resized_cache is not None and not isinstance(
+            resized_cache, ResizedImageCache
+        ):
+            raise ValueError("resized_cache must be a ResizedImageCache")
+        self.resized_cache = resized_cache
+        self._after_resize_transform = (
+            resized_cache.prepare_transform(
+                self.image_ids, self.images_dir, self.transform
+            )
+            if resized_cache is not None
+            else None
+        )
 
     def __len__(self) -> int:
         return len(self.image_ids)
@@ -34,9 +49,15 @@ class SkinLesionImageDataset(Dataset):
     def __getitem__(self, index: int):
         image_id = self.image_ids[index]
         image_path = self.images_dir / f"{image_id}.jpg"
-        image = Image.open(image_path).convert("RGB")
+        image = (
+            self.resized_cache.get(image_id)
+            if self.resized_cache is not None
+            else Image.open(image_path).convert("RGB")
+        )
 
-        if self.transform is not None:
+        if self._after_resize_transform is not None:
+            image = self._after_resize_transform(image)
+        elif self.transform is not None:
             image = self.transform(image)
 
         label = torch.tensor(self.labels[index], dtype=torch.float32)

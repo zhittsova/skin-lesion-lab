@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "paid_budget": 0,
+  "pilot_budget_seconds": 2700,
+  "case_budget_seconds": 420,
+  "lengths": [
+    6,
+    24
+  ],
+  "repeats": 2,
+  "batch_size": 64,
+  "image_size": 128,
+  "reserve_host_bytes": 2147483648,
+  "reserve_device_bytes": 1073741824,
+  "reserve_disk_bytes": 4294967296
+}
