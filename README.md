@@ -11,8 +11,9 @@ groups. The [evaluation protocol](docs/evaluation-protocol.md) records data use,
 seeds, comparison budgets, endpoints and confirmation limits.
 
 The project is experimental and has not been clinically validated. The S09
-development comparison has an audited, run-linked report; it is not external
-confirmation or a clinical decision tool.
+development comparison has an audited, run-linked report. A later HIBA evaluation
+used the saved models and policies, but its primary interval includes zero and
+the original release did not completely freeze the execution code.
 [The dated development status](docs/development-status-2026-09-22.md) separates
 that accepted result from later diagnostic work and future methods.
 
@@ -36,6 +37,12 @@ with `image_id`, `lesion_id`, and `dx`, or `isic2018_task3` for an ISIC 2018 Tas
 export with `isic_id`, `lesion_id`, and `diagnosis_1` through `diagnosis_3`.
 The source selection is explicit. See [the source catalog](catalog/sources.json)
 for provenance, terms, and the local metadata checksum. Data is not redistributed.
+
+The development data credit is ViDIR Group, Department of Dermatology, Medical University of Vienna. See Philipp Tschandl, Cliff Rosendahl and Harald Kittler, [the HAM10000 data descriptor](https://doi.org/10.1038/sdata.2018.161) (2018), and Noel Codella et al., [the ISIC 2018 challenge paper](https://arxiv.org/abs/1902.03368).
+The local export matches ISIC 2018 Task 3 by fields and counts, but its original
+download receipt is unavailable. Its [CC-BY-NC terms](https://challenge.isic-archive.com/data/)
+remain applicable. HIBA is credited to Hospital Italiano de Buenos Aires under
+CC-BY ([dataset DOI](https://doi.org/10.34970/587329)).
 
 ```sh
 uv run --locked python freeze_splits.py \
@@ -124,8 +131,17 @@ Deep training defaults to unweighted loss. Use `--loss-strategy pos_weight` for
 the training-count-weighted ablation. Weighted outputs need calibration before a
 probability-based cost threshold can be interpreted as an optimal decision rule.
 The 10:1 cost ratio is illustrative. The S09 report separates variation across
-seeds from grouped resampling intervals. This branch documents the development
-comparison; external-cohort status belongs to the later external-evaluation work.
+seeds from grouped resampling intervals.
+
+Six saved-model runs cover 884 eligible HIBA dermoscopy images. The paired
+ROC-AUC difference was 0.0481 (95% interval -0.0016 to 0.1091), which includes
+zero. Later inspection reproduced the saved predictions and report, but the
+original release omitted execution dependencies and did not enforce its protocol
+digest. The [external status note](docs/external-status-2026-09-22.md) explains
+why reconstruction cannot establish a complete pre-outcome freeze. The manuscript
+decision remains no-go, and these results do not support clinical use.
+The [draft story](docs/experiment-story.md) connects the development comparison,
+GMM diagnosis and external result to those limits.
 
 ## Notebooks and measured results
 
@@ -164,6 +180,9 @@ versus the accepted fitted-probability ROC-AUC of 0.5704. The
 [development notebook](notebooks/02-development-report.ipynb) gives the three
 seed values and limits. This analysis leaves the frozen endpoint intact; it is
 not a new trained result or evidence that raw probabilities are calibrated.
+The [v2 score interface](docs/calibration-v2.md) is available for a future,
+prospectively specified experiment; no real-data performance claim follows from
+its software tests.
 
 Dependabot updates Python dependencies, Actions, and container images.
 
