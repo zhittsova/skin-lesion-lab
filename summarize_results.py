@@ -18,7 +18,7 @@ def main() -> None:
     args = parser.parse_args()
     record, _ = run_contract.validate_run(args.run_dir)
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": record["run_id"],
         "split_hash": record["split_hash"],
         **run_contract.recompute_report(args.run_dir),
@@ -28,7 +28,7 @@ def main() -> None:
             raise ValueError("cannot modify a completed run")
         reporting.save_json(result, args.output)
     else:
-        print(json.dumps(reporting.to_builtin(result), indent=2))
+        print(json.dumps(reporting.to_builtin(result), indent=2, allow_nan=False))
 
 
 if __name__ == "__main__":

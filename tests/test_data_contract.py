@@ -1,11 +1,12 @@
 import csv
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from PIL import Image
-from src import data
+from src import data, splitting
 
 
 class DataContractTests(unittest.TestCase):
@@ -263,6 +264,135 @@ class DataContractTests(unittest.TestCase):
             )
         audit = json.loads(audit_path.read_text())
         self.assertEqual(audit["counts"], {"input": 1, "missing_image": 1})
+
+    def test_excluded_rows_preserve_chained_identity_links(self):
+        rows = []
+        for target in (0, 1):
+            for index in range(12):
+                image_id = f"I{target}_{index:02d}"
+                Image.new("RGB", (4, 4), (target * 110, index * 18, 25)).save(
+                    self.images / f"{image_id}.jpg"
+                )
+                rows.append(
+                    {
+                        "image_id": image_id,
+                        "lesion_id": f"L{target}_{index:02d}",
+                        "dx": "mel" if target else "nv",
+                        "duplicate_cluster_id": "",
+                    }
+                )
+        # A -> missing -> corrupt -> excluded diagnosis -> B. None of the
+        # three bridge images is eligible, but each supplies a known link.
+        rows[0]["duplicate_cluster_id"] = "first"
+        rows[1]["duplicate_cluster_id"] = "last"
+        rows.extend(
+            [
+                {
+                    "image_id": "missing",
+                    "lesion_id": "bridge1",
+                    "dx": "nv",
+                    "duplicate_cluster_id": "first",
+                },
+                {
+                    "image_id": "corrupt",
+                    "lesion_id": "bridge1",
+                    "dx": "nv",
+                    "duplicate_cluster_id": "middle",
+                },
+                {
+                    "image_id": "excluded",
+                    "lesion_id": "bridge2",
+                    "dx": "bcc",
+                    "duplicate_cluster_id": "middle",
+                },
+                {
+                    "image_id": "excluded2",
+                    "lesion_id": "bridge2",
+                    "dx": "bcc",
+                    "duplicate_cluster_id": "last",
+                },
+            ]
+        )
+        (self.images / "corrupt.jpg").write_bytes(b"not an image")
+        frame = self.run_cohort("ham10000", rows).frame
+        manifest = splitting.create_manifest(frame)
+        membership = {
+            image: group["group_id"]
+            for group in manifest["groups"]
+            for image in group["image_ids"]
+        }
+        roles = {
+            image: role for role, ids in manifest["partitions"].items() for image in ids
+        }
+        self.assertEqual(membership["I0_00"], membership["I0_01"])
+        self.assertEqual(roles["I0_00"], roles["I0_01"])
+        self.assertNotEqual(membership["I0_00"], membership["I0_02"])
+        self.assertEqual(
+            manifest,
+            splitting.create_manifest(self.run_cohort("ham10000", rows[::-1]).frame),
+        )
+
+        tampered = json.loads(json.dumps(manifest))
+        tampered["identity_components"]["I0_01"] = "unlinked"
+        with self.assertRaisesRegex(ValueError, "manifest mismatch"):
+            splitting.manifest_indices(frame, tampered)
+
+        mixed = [dict(row) for row in rows]
+        mixed[1]["duplicate_cluster_id"] = ""
+        mixed[12]["duplicate_cluster_id"] = "last"
+        with self.assertRaisesRegex(ValueError, "mixed labels"):
+            splitting.create_manifest(self.run_cohort("ham10000", mixed).frame)
+
+    def test_patient_and_exact_content_links_survive_exclusion(self):
+        rows = []
+        for target in (0, 1):
+            for index in range(12):
+                image_id = f"P{target}_{index:02d}"
+                Image.new("RGB", (4, 4), (target * 110, index * 18, 35)).save(
+                    self.images / f"{image_id}.jpg"
+                )
+                rows.append(
+                    {
+                        "image_id": image_id,
+                        "lesion_id": f"L{target}_{index:02d}",
+                        "patient_id": f"patient{target}_{index:02d}",
+                        "duplicate_cluster_id": "",
+                        "dx": "mel" if target else "nv",
+                    }
+                )
+        rows[1]["duplicate_cluster_id"] = "pixel_bridge"
+        rows.append(
+            {
+                "image_id": "excluded_pixel",
+                "lesion_id": "other",
+                "patient_id": "patient_extra",
+                "duplicate_cluster_id": "pixel_bridge",
+                "dx": "bcc",
+            }
+        )
+        shutil.copyfile(self.images / "P0_00.jpg", self.images / "excluded_pixel.jpg")
+        rows[2]["duplicate_cluster_id"] = "patient_bridge"
+        rows.append(
+            {
+                "image_id": "missing_patient",
+                "lesion_id": "another",
+                "patient_id": "patient0_00",
+                "duplicate_cluster_id": "patient_bridge",
+                "dx": "nv",
+            }
+        )
+        frame = self.run_cohort("ham10000", rows).frame
+        manifest = splitting.create_manifest(frame)
+        group = {
+            image: item["group_id"]
+            for item in manifest["groups"]
+            for image in item["image_ids"]
+        }
+        self.assertEqual({group[f"P0_{i:02d}"] for i in (0, 1, 2)}, {group["P0_00"]})
+        self.assertEqual(manifest["schema_version"], 2)
+        rows[-1]["patient_id"] = ""
+        with self.assertRaisesRegex(ValueError, "partial patient IDs"):
+            self.run_cohort("ham10000", rows)
 
 
 if __name__ == "__main__":

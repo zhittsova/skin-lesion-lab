@@ -327,7 +327,12 @@ def plot_metric_comparison(
     width = 0.25
 
     for i, split_name in enumerate(split_names):
-        values = [metrics_dict[split_name].get(m, 0) for m in metric_names]
+        values = [
+            np.nan
+            if metrics_dict[split_name].get(m) is None
+            else metrics_dict[split_name][m]
+            for m in metric_names
+        ]
         ax.bar(x + i * width, values, width, label=split_name)
 
     ax.set_xlabel("Metrics")
@@ -348,7 +353,7 @@ def plot_metric_comparison(
 def plot_threshold_comparison(
     metrics_by_point: Mapping[str, Mapping[str, float | int]],
     save_path: str | None = None,
-    title: str = "Threshold Comparison on Test Set",
+    title: str = "Threshold comparison on development cohort",
 ) -> plt.Figure:
     """Compare MAP and cost-sensitive threshold operating points."""
     metric_names = ["recall", "specificity", "precision", "f1", "average_cost"]
@@ -357,6 +362,7 @@ def plot_threshold_comparison(
         float(metrics_by_point[point_name][metric])
         for point_name in point_names
         for metric in metric_names
+        if metrics_by_point[point_name][metric] is not None
     )
 
     x = np.arange(len(metric_names))
@@ -366,14 +372,17 @@ def plot_threshold_comparison(
     for i, point_name in enumerate(point_names):
         offset = (i - (len(point_names) - 1) / 2) * width
         values = [
-            float(metrics_by_point[point_name][metric]) for metric in metric_names
+            np.nan
+            if metrics_by_point[point_name][metric] is None
+            else float(metrics_by_point[point_name][metric])
+            for metric in metric_names
         ]
         bars = ax.bar(x + offset, values, width, label=point_name)
         for bar, value in zip(bars, values):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height(),
-                f"{value:.2f}",
+                bar.get_height() if np.isfinite(value) else 0,
+                f"{value:.2f}" if np.isfinite(value) else "undefined",
                 ha="center",
                 va="bottom",
                 fontsize=9,
@@ -385,7 +394,7 @@ def plot_threshold_comparison(
     ax.set_xticks(x)
     ax.set_xticklabels(["Recall", "Specificity", "Precision", "F1", "Avg. cost"])
     ax.legend()
-    ax.set_ylim([0, min(1.5, max(1.0, max_value) * 1.18)])
+    ax.set_ylim([0, max(1.0, max_value) * 1.18])
     ax.grid(True, alpha=0.3, axis="y")
 
     if save_path:

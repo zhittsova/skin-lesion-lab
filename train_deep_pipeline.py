@@ -456,7 +456,7 @@ def main() -> None:
         args.runs_dir,
         run_id=getattr(args, "run_id", None),
         pipeline=f"deep_{args.architecture}",
-        config={**vars(args), "decision_policy_version": 1},
+        config={**vars(args), "decision_policy_version": 1, "metrics_version": 2},
         inputs={
             "metadata": args.metadata_path,
             "split_manifest": args.split_manifest,
@@ -658,6 +658,10 @@ def _run(args) -> None:
                     raise ValueError("non-finite training loss")
                 if not np.isfinite(selection_loss):
                     raise ValueError("non-finite checkpoint selection loss")
+                if selection_metrics["roc_auc"] is None:
+                    raise ValueError(
+                        "no finite checkpoint selection AUC: both classes required"
+                    )
                 score = float(selection_metrics["roc_auc"])
 
                 history_row = {
@@ -1054,6 +1058,8 @@ def _run(args) -> None:
     ).to_csv(tables_dir / f"{args.architecture}_roc_curve_points.csv", index=False)
 
     summary = {
+        "metrics_version": 2,
+        "decision_policy_version": 1,
         "pipeline": "Project-owned deep CNN with MC Dropout",
         "architecture": args.architecture,
         "task": "binary melanoma-vs-benign classification",

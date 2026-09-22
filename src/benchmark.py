@@ -7,13 +7,15 @@ from sklearn.metrics import (
     auc,
     average_precision_score,
     precision_recall_curve,
-    roc_auc_score,
 )
 
+from src import evaluation
+
 SEEDS = (17, 42, 73)
+METRICS_VERSION = 2
 
 
-def _arrays(frame):
+def _arrays(frame, *, require_both_classes=False):
     if frame.empty:
         raise ValueError("empty prediction cohort")
     y = frame.target.to_numpy()
@@ -21,38 +23,59 @@ def _arrays(frame):
     d = frame.prediction.to_numpy()
     if (
         not np.isin(y, [0, 1]).all()
-        or set(y) != {0, 1}
+        or (require_both_classes and set(y) != {0, 1})
         or not np.isin(d, [0, 1]).all()
         or not np.isfinite(p).all()
         or np.any((p < 0) | (p > 1))
     ):
-        raise ValueError("endpoints require both classes and finite binary predictions")
+        raise ValueError("endpoints require nonempty finite binary predictions")
     return y, p, d
 
 
-def endpoints(frame):
-    """Image-level endpoints; undefined precision remains null, never zero."""
-    y, p, d = _arrays(frame)
-    tp, tn = np.sum((y == 1) & (d == 1)), np.sum((y == 0) & (d == 0))
-    fp, fn = np.sum((y == 0) & (d == 1)), np.sum((y == 1) & (d == 0))
-    precision, recall, _ = precision_recall_curve(y, p)
+def endpoints(frame, *, metrics_version=METRICS_VERSION):
+    """Image-level endpoints with explicit historical or current null semantics."""
+    if type(metrics_version) is not int or metrics_version not in (1, 2):
+        raise ValueError("unsupported benchmark metrics version")
+    y, p, d = _arrays(frame, require_both_classes=metrics_version == 1)
+    common = evaluation.compute_classification_metrics(
+        y, d, p, metrics_version=metrics_version
+    )
+    both_classes = set(y) == {0, 1}
+    if both_classes:
+        precision, recall, _ = precision_recall_curve(y, p)
+        average_precision = float(average_precision_score(y, p))
+        pr_auc = float(auc(recall, precision))
+    else:
+        average_precision = pr_auc = None
     clipped = np.clip(p, 1e-15, 1 - 1e-15)
     return {
-        "roc_auc": float(roc_auc_score(y, p)),
-        "average_precision": float(average_precision_score(y, p)),
-        "pr_auc": float(auc(recall, precision)),
-        "sensitivity": float(tp / (tp + fn)),
-        "specificity": float(tn / (tn + fp)),
-        "precision": float(tp / (tp + fp)) if tp + fp else None,
-        "brier_score": float(np.mean((p - y) ** 2)),
+        "roc_auc": common["roc_auc"],
+        "average_precision": average_precision,
+        "pr_auc": pr_auc,
+        "sensitivity": common["sensitivity"],
+        "specificity": common["specificity"],
+        "precision": (
+            float(common["tp"] / (common["tp"] + common["fp"]))
+            if common["tp"] + common["fp"]
+            else None
+        ),
+        "brier_score": common["brier_score"],
         "log_loss": float(-np.mean(y * np.log(clipped) + (1 - y) * np.log1p(-clipped))),
-        "average_cost": float((10 * fn + fp) / len(y)),
+        "average_cost": float((10 * common["fn"] + common["fp"]) / len(y)),
     }
+
+
+def report_metrics_version(report):
+    """Unversioned accepted benchmark reports replay under the original contract."""
+    version = report.get("metrics_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported benchmark metrics version")
+    return version
 
 
 def group_draws(frame, *, draws=2000, seed=2026):
     """Sample whole components within class, preserving image multiplicities."""
-    _arrays(frame)
+    _arrays(frame, require_both_classes=True)
     if isinstance(draws, bool) or not isinstance(draws, int) or draws < 1:
         raise ValueError("draws must be a positive integer")
     for column in ("image_id", "group_id"):
@@ -90,7 +113,14 @@ def _summary(seed_values, draws):
     }
 
 
-def paired_report(models: Mapping, *, reference: str, draws=2000, seed=2026):
+def paired_report(
+    models: Mapping,
+    *,
+    reference: str,
+    draws=2000,
+    seed=2026,
+    metrics_version=METRICS_VERSION,
+):
     """Average seed metrics on shared class-stratified group draws.
 
     Inputs map each named, already selected model stratum to all three seeds.
@@ -98,6 +128,7 @@ def paired_report(models: Mapping, *, reference: str, draws=2000, seed=2026):
     """
     if not models or reference not in models:
         raise ValueError("a reference model and nonempty comparison are required")
+    report_metrics_version({"metrics_version": metrics_version})
     aligned = {}
     identity = None
     for model in sorted(models):
@@ -106,7 +137,7 @@ def paired_report(models: Mapping, *, reference: str, draws=2000, seed=2026):
         aligned[model] = {}
         for s in SEEDS:
             f = models[model][s].sort_values("image_id").reset_index(drop=True)
-            _arrays(f)
+            _arrays(f, require_both_classes=True)
             if f.image_id.duplicated().any():
                 raise ValueError("duplicate image IDs")
             ids = f[["image_id", "group_id", "target"]]
@@ -119,14 +150,18 @@ def paired_report(models: Mapping, *, reference: str, draws=2000, seed=2026):
             aligned[model][s] = f
     cohort = aligned[reference][SEEDS[0]]
     points = {
-        m: {s: endpoints(f) for s, f in runs.items()} for m, runs in aligned.items()
+        m: {s: endpoints(f, metrics_version=metrics_version) for s, f in runs.items()}
+        for m, runs in aligned.items()
     }
     metrics = tuple(points[reference][SEEDS[0]])
     samples = {m: {k: [] for k in metrics} for m in aligned}
     contrasts = {m: {k: [] for k in metrics} for m in aligned if m != reference}
     for indices in group_draws(cohort, draws=draws, seed=seed):
         values = {
-            m: {s: endpoints(f.iloc[indices]) for s, f in runs.items()}
+            m: {
+                s: endpoints(f.iloc[indices], metrics_version=metrics_version)
+                for s, f in runs.items()
+            }
             for m, runs in aligned.items()
         }
         for m in aligned:
@@ -141,6 +176,7 @@ def paired_report(models: Mapping, *, reference: str, draws=2000, seed=2026):
                     ]
                     contrasts[m][k].append(_mean(differences))
     return {
+        "metrics_version": metrics_version,
         "purpose": "development",
         "log_loss_clip": 1e-15,
         "seeds": list(SEEDS),

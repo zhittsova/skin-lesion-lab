@@ -66,3 +66,16 @@ not silently discard draws. Calibration bins and referral summaries come from
 the saved predictions and policies. All outputs remain development evidence.
 Unknown patient identity and unrecorded duplicates limit the group intervals.
 No confirmation or clinical performance claim follows from these checks.
+
+New reports declare `metrics_version: 2`. Endpoint calculations share the run
+summary's denominator rules: a rate with no denominator is null, while a
+measured zero stays zero. A nonempty one-class bootstrap draw has null ROC-AUC,
+average precision and PR-AUC. Its defined rates, Brier score, log loss and cost
+remain numeric. If any seed value or paired draw is undefined, the corresponding
+mean or interval is null; `undefined_draws` counts those draws. The original
+comparison cohort still requires both classes.
+
+Accepted reports without `metrics_version` use the original version 1 contract
+when replayed. They retain their saved bytes and values. A new diagnostic can
+read their checked predictions and explicitly request version 1 arithmetic;
+new exports use version 2 and must be written to a separate path.
