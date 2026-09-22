@@ -100,12 +100,21 @@ fitted partitions against external image IDs,
 release files, manifest, overlap audit and image bytes. Failed execution retains
 a failed record. Existing output directories are never reused.
 
+Manifest validation also derives `input`, `retained` and each exclusion count
+from the rows' final reasons. It rejects a declared count that disagrees with
+those rows even when the manifest and audit hashes have been recomputed. The
+[external evaluation guide](external-evaluation.md) specifies the required count
+keys, optional zero-valued exclusions and final-reason precedence.
+
 The report boundary requires exactly the two families and three seeds above,
-with no extra run directories. It verifies each saved result's release, audit,
-manifest, fitted identity, execution source and environment, then reconstructs
-its predictions and policy report from saved scores. It checks inputs and result
-files and the full fitted-run contract again before writing the report. A
-contract failure prevents an accepted report from being written. CSV reads
+with no extra run directories. It verifies the release and audit, then validates
+row-derived manifest counts before reading saved predictions. It checks each
+result's fitted identity, execution source and environment, then reconstructs
+predictions and policy reports from saved scores. It checks inputs, result files,
+manifest counts and the full fitted-run contract again before writing. Report
+image, group and class counts come from retained rows. Its attrition table uses
+the validated manifest counts. A contract failure prevents an accepted report from
+being written. CSV reads
 preserve lexical image, group and run IDs, including leading zeros and NA-like
 strings. Image IDs still follow the source identifier rules.
 

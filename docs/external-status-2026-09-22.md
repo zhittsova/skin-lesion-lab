@@ -21,10 +21,14 @@ Saved-score reconstruction applies the original policy and metric contracts.
 It does not run models, fit calibration or replace the accepted report.
 
 New execution requires the [v2 release contract](external-release-v2.md). Its
-complete source and dependency checks improve future enforcement. They do not
-retroactively strengthen the original freeze or demonstrate performance for a
-new method. A future evaluation needs a separately reviewed release and a record
-of when its protocol and execution inputs were fixed.
+strict gate revalidates each fitted run, checks manifest attrition against its
+rows at inference and reporting, and compares the captured source and versioned
+runtime dependency inventory with the executing process. An older incomplete
+strict environment snapshot must be captured again for a new reviewed release.
+These checks improve future enforcement. They do not retroactively strengthen
+the original freeze or demonstrate performance for a new method. A future
+evaluation needs a separately reviewed release and a record of when its
+protocol and execution inputs were fixed.
 
 The original local evidence is identified by these SHA-256 values:
 
