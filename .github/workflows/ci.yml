@@ -34,6 +34,7 @@ jobs:
       - run: uv run --locked ruff format --check .
       - run: uv run --locked python -m unittest discover -s tests -v
       - run: uv run --locked python scripts/smoke_experiment.py
+      - run: uv run --locked --group notebooks python scripts/check_notebooks.py --mode synthetic
       - run: uv run --locked python train_pipeline.py --help
       - run: uv run --locked python train_deep_pipeline.py --help
       - run: uv run --locked python scripts/check_repository.py --tracked

@@ -10,8 +10,11 @@ Training, model selection, calibration and development evaluation use distinct
 groups. The [evaluation protocol](docs/evaluation-protocol.md) records data use,
 seeds, comparison budgets, endpoints and confirmation limits.
 
-The project is experimental and has not been clinically validated. Earlier
-results still need a methodological audit before they can serve as benchmarks.
+The project is experimental and has not been clinically validated. The S09
+development comparison has an audited, run-linked report; it is not external
+confirmation or a clinical decision tool.
+[The dated development status](docs/development-status-2026-09-22.md) separates
+that accepted result from later diagnostic work and future methods.
 
 ## Run
 
@@ -120,11 +123,48 @@ evaluation. Both CLIs reject confirmation-purpose manifests.
 Deep training defaults to unweighted loss. Use `--loss-strategy pos_weight` for
 the training-count-weighted ablation. Weighted outputs need calibration before a
 probability-based cost threshold can be interpreted as an optimal decision rule.
-The 10:1 cost ratio is illustrative. Further evaluation should report variation
-across seeds and grouped resamples, followed by testing on an untouched external
-cohort.
+The 10:1 cost ratio is illustrative. The S09 report separates variation across
+seeds from grouped resampling intervals. This branch documents the development
+comparison; external-cohort status belongs to the later external-evaluation work.
 
-Planned Jupyter notebooks will explain the experiments and their results.
+## Notebooks and measured results
+
+The [grouping example](notebooks/01-groups.ipynb) uses generated data. The
+[development notebook](notebooks/02-development-report.ipynb) reads the accepted
+S09 report, verifies its SHA-256, plan digest and embedded run registry, then
+displays run IDs beside the model estimates. It does not open the 27 fitted run
+records or validate their files. The report and real images are not distributed. Obtain
+the report from the locally validated S09 run; do not substitute a similarly
+named file. Start from the repository root with Python 3.14.7 and uv 0.12.13:
+
+```sh
+uv sync --locked --group notebooks
+uv run --locked --group notebooks python scripts/check_notebooks.py --mode synthetic
+uv run --locked --group notebooks python scripts/check_notebooks.py \
+  --mode accepted --report /path/to/benchmark-report.json
+```
+
+The first execution uses six generated records and constructed predictions for
+the grouping example, plus generated predictions for the model table. It labels
+both as illustrative.
+The second requires the exact accepted private report. Each run writes executed
+copies under ignored `outputs/notebooks/`; the published sources stay clean.
+
+On the 1,395-image development set, unweighted full EfficientNet has mean
+ROC-AUC 0.8906 across seeds 17, 42 and 73, versus 0.7552 for HSV logistic
+regression. The prespecified paired difference is 0.1354 (95% component
+bootstrap interval 0.0950 to 0.1761). Its sensitivity difference interval
+crosses zero. The 10:1 error cost is illustrative, and referral retains some
+missed melanoma images. Grouping covers lesion and known-duplicate links, not
+verified patient identities. The results do not establish clinical safety.
+
+A retrospective check of the saved GMM scores found that fixed clipping before
+calibration turned most tail scores into ties. Mean raw-score ROC-AUC was 0.7364,
+versus the accepted fitted-probability ROC-AUC of 0.5704. The
+[development notebook](notebooks/02-development-report.ipynb) gives the three
+seed values and limits. This analysis leaves the frozen endpoint intact; it is
+not a new trained result or evidence that raw probabilities are calibrated.
+
 Dependabot updates Python dependencies, Actions, and container images.
 
 Probability calibration and saved referral rules are described in
