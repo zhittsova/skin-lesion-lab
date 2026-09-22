@@ -1,6 +1,4 @@
 import copy
-import hashlib
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,24 +12,18 @@ class ExternalContractTests(unittest.TestCase):
     def test_release_rejects_changed_bytes_and_changed_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            artifact = root / "model.bin"
-            artifact.write_bytes(b"frozen")
+            from tests.external_fixtures import ReleaseFixture
+
+            fixture = ReleaseFixture(root)
             release = root / "release.json"
-            release.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "files": {"model.bin": hashlib.sha256(b"frozen").hexdigest()},
-                    }
-                )
-            )
-            digest = hashlib.sha256(release.read_bytes()).hexdigest()
+            digest = fixture.save()
             external.verify_files(release, digest, root)
+            artifact = root / "fitted/logistic-17/models/logistic_model.pkl"
             artifact.write_bytes(b"refitted")
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 external.verify_files(release, digest, root)
             release.write_text("{}")
-            with self.assertRaisesRegex(ValueError, "release hash"):
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 external.verify_files(release, digest, root)
 
     def test_connected_groups_preserve_mixed_patient_and_excluded_links(self):

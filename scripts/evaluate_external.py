@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src import external, external_inference, run_contract  # noqa: E402
+from src import external_inference  # noqa: E402
 
 
 def main():
@@ -24,7 +24,16 @@ def main():
     parser.add_argument("--run-id")
     parser.add_argument("--runs-dir", type=Path, required=True)
     parser.add_argument("--device", choices=["cpu", "mps", "cuda"], default="cpu")
+    parser.add_argument("--output-report", type=Path)
+    parser.add_argument("--legacy-source-root", type=Path)
+    parser.add_argument("--legacy-protocol", type=Path)
     args = parser.parse_args()
+    if args.operation == "run" and (args.legacy_source_root or args.legacy_protocol):
+        parser.error("legacy inspection cannot run inference")
+    if bool(args.legacy_source_root) != bool(args.legacy_protocol):
+        parser.error(
+            "legacy inspection requires source and protocol snapshots together"
+        )
     if args.operation == "run":
         if any(
             value is None
@@ -54,52 +63,20 @@ def main():
             )
         )
         return
-    release = external.verify_files(args.release, args.release_sha256, ROOT)
-    if run_contract.sha256(args.manifest) != args.manifest_sha256:
-        raise ValueError("external manifest hash mismatch")
-    manifest = run_contract._json(args.manifest)
-    external_inference.validate_audit(
-        args.audit, args.audit_sha256, args.manifest_sha256
-    )
-    models = {}
-    registry = {}
-    for name, run in release["runs"].items():
-        path = args.runs_dir / name
-        frame = external_inference.validate_predictions(
-            path,
-            release,
-            args.release_sha256,
-            manifest,
-            args.manifest_sha256,
-            ROOT,
-            expected_run_id=name,
-            audit_sha256=args.audit_sha256,
-        )
-        models.setdefault(run["family"], {})[run["seed"]] = frame
-        registry[name] = {
-            "run_sha256": run_contract.sha256(path / "run.json"),
-            "prediction_sha256": run_contract.sha256(path / "predictions.csv"),
-        }
-    report = external.paired_report(models)
-    report.update(
+    report = external_inference.write_report(
+        root=ROOT,
+        release_path=args.release,
         release_sha256=args.release_sha256,
+        manifest_path=args.manifest,
         manifest_sha256=args.manifest_sha256,
-        cohort_sha256=manifest["cohort_sha256"],
+        audit_path=args.audit,
         audit_sha256=args.audit_sha256,
-        registry=registry,
-        exclusions=manifest["counts"],
+        runs_dir=args.runs_dir,
+        output_path=args.output_report,
+        legacy_source_root=args.legacy_source_root,
+        legacy_protocol_path=args.legacy_protocol,
     )
-    with (args.runs_dir / "external-report.json").open("x") as handle:
-        json.dump(report, handle, indent=2, allow_nan=False)
-        handle.write("\n")
-    print(
-        json.dumps(
-            {
-                "counts": report["counts"],
-                "report": str(args.runs_dir / "external-report.json"),
-            }
-        )
-    )
+    print(json.dumps({"counts": report["counts"], "contract": report["contract"]}))
 
 
 if __name__ == "__main__":

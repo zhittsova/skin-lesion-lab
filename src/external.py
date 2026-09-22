@@ -9,7 +9,14 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from src import benchmark, calibration, cohort, run_contract, splitting
+from src import (
+    benchmark,
+    calibration,
+    cohort,
+    external_release,
+    run_contract,
+    splitting,
+)
 
 
 def fingerprint(path, image_id):
@@ -40,10 +47,12 @@ def fingerprint(path, image_id):
     }
 
 
-def endpoints(frame):
+def endpoints(frame, *, metrics_version=2):
     """Keep defined one-class scores while marking undefined rates as null."""
-    if frame.target.nunique() == 2:
-        return benchmark.endpoints(frame)
+    if metrics_version == 2 or frame.target.nunique() == 2:
+        return benchmark.endpoints(frame, metrics_version=metrics_version)
+    if type(metrics_version) is not int or metrics_version != 1:
+        raise ValueError("unsupported external metrics version")
     y = calibration.targets(frame.target.to_numpy(), len(frame))
     p = calibration.probabilities(frame.prob_melanoma.to_numpy())
     d = frame.prediction.to_numpy()
@@ -66,20 +75,8 @@ def endpoints(frame):
 
 
 def verify_files(release_path, expected_sha256, root):
-    """Verify the trusted release digest before reading any fitted artifact."""
-    path, root = Path(release_path), Path(root)
-    if run_contract.sha256(path) != expected_sha256:
-        raise ValueError("release hash mismatch")
-    release = run_contract._json(path)
-    if release.get("schema_version") != 1 or not release.get("files"):
-        raise ValueError("invalid release manifest")
-    for name, digest in release["files"].items():
-        relative = Path(name)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("unsafe release path")
-        if run_contract.sha256(root / relative) != digest:
-            raise ValueError(f"artifact hash mismatch: {name}")
-    return release
+    """Strict v2 acceptance; v1 releases have a separate inspection-only API."""
+    return external_release.verify_release(release_path, expected_sha256, root)
 
 
 def connected_groups(frame):
@@ -364,7 +361,9 @@ def component_draws(frame, *, draws=2000, seed=2026):
         )
 
 
-def paired_report(models, *, reference="logistic", draws=2000, seed=2026):
+def paired_report(
+    models, *, reference="logistic", draws=2000, seed=2026, metrics_version=2
+):
     """Paired image metrics with mixed-label patient components kept intact."""
     if not models or reference not in models:
         raise ValueError("missing reference model")
@@ -385,7 +384,7 @@ def paired_report(models, *, reference="logistic", draws=2000, seed=2026):
             aligned[model][s] = frame
     cohort = aligned[reference][benchmark.SEEDS[0]]
     points = {
-        m: {s: benchmark.endpoints(f) for s, f in runs.items()}
+        m: {s: endpoints(f, metrics_version=metrics_version) for s, f in runs.items()}
         for m, runs in aligned.items()
     }
     metrics = tuple(points[reference][benchmark.SEEDS[0]])
@@ -393,7 +392,10 @@ def paired_report(models, *, reference="logistic", draws=2000, seed=2026):
     differences = {m: {k: [] for k in metrics} for m in aligned if m != reference}
     for indices in component_draws(cohort, draws=draws, seed=seed):
         values = {
-            m: {s: endpoints(f.iloc[indices]) for s, f in runs.items()}
+            m: {
+                s: endpoints(f.iloc[indices], metrics_version=metrics_version)
+                for s, f in runs.items()
+            }
             for m, runs in aligned.items()
         }
         for m in aligned:
@@ -414,6 +416,7 @@ def paired_report(models, *, reference="logistic", draws=2000, seed=2026):
                         )
                     )
     return {
+        "metrics_version": metrics_version,
         "purpose": "external",
         "seeds": list(benchmark.SEEDS),
         "bootstrap": {
@@ -471,7 +474,10 @@ def prediction_frame(cohort, raw_scores, policy, *, run_id):
     variances = scores.var(axis=0, ddof=1) if scores.ndim == 2 else None
     applied = calibration.apply_policy(policy, scores, variances=variances)
     result = cohort[["image_id", "group_id", "target"]].copy()
-    result["schema_version"] = 1
+    if policy["schema_version"] == 2:
+        result["calibration_score"] = scores
+        result["ranking_score"] = applied["ranking_score"]
+    result["schema_version"] = policy["schema_version"]
     result["role"] = "external"
     result["run_id"] = run_id
     result["prob_melanoma"] = applied["calibrated_probability"]
