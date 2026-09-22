@@ -402,8 +402,50 @@ class ExternalReleaseTests(unittest.TestCase):
         self.assertEqual(len(report["registry"]), 6)
         self.assertTrue(report["strict_release_accepted"])
         self.assertEqual(
+            report["counts"],
+            {"images": 6, "groups": 6, "classes": {"0": 3, "1": 3}},
+        )
+        self.assertEqual(report["exclusions"], {"input": 6, "retained": 6})
+        self.assertEqual(
             set(report["models"]), {"logistic", "efficientnet-full-unweighted"}
         )
+        original_manifest = copy.deepcopy(self.fixture.manifest)
+        original_manifest_bytes = (self.root / "manifest.json").read_bytes()
+        original_audit_bytes = (self.root / "audit.json").read_bytes()
+        self.fixture.manifest["counts"]["retained"] = 999
+        self.fixture.manifest["cohort_sha256"] = splitting.canonical_hash(
+            {
+                key: value
+                for key, value in self.fixture.manifest.items()
+                if key != "cohort_sha256"
+            }
+        )
+        write(self.root / "manifest.json", self.fixture.manifest)
+        write(
+            self.root / "audit.json",
+            {
+                "clear": True,
+                "manifest_sha256": digest(self.root / "manifest.json"),
+                "exact": [],
+                "near": [],
+            },
+        )
+        malformed = {
+            **common,
+            "manifest_sha256": digest(self.root / "manifest.json"),
+            "audit_sha256": digest(self.root / "audit.json"),
+            "output_path": self.root / "bad-count-report.json",
+        }
+        with (
+            patch.object(external_inference, "validate_predictions") as validator,
+            self.assertRaisesRegex(ValueError, "manifest counts"),
+        ):
+            external_inference.write_report(**malformed, draws=5)
+        validator.assert_not_called()
+        self.assertFalse(malformed["output_path"].exists())
+        self.fixture.manifest = original_manifest
+        (self.root / "manifest.json").write_bytes(original_manifest_bytes)
+        (self.root / "audit.json").write_bytes(original_audit_bytes)
         with self.assertRaisesRegex(ValueError, "report settings"):
             external_inference.write_report(
                 **common, output_path=self.root / "wrong-settings.json", draws=2
@@ -472,7 +514,7 @@ class ExternalReleaseTests(unittest.TestCase):
             write(path, value)
             with self.subTest(key=key), self.assertRaises(ValueError):
                 external_inference.write_report(
-                    **common, output_path=self.root / "bad-report.json", draws=2
+                    **common, output_path=self.root / "bad-report.json", draws=5
                 )
             self.assertFalse((self.root / "bad-report.json").exists())
             path.write_bytes(original)
@@ -500,7 +542,7 @@ class ExternalReleaseTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             external_inference.write_report(
-                **common, output_path=self.root / "bad-report.json", draws=2
+                **common, output_path=self.root / "bad-report.json", draws=5
             )
         self.assertFalse((self.root / "bad-report.json").exists())
 

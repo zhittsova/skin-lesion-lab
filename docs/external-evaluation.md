@@ -32,6 +32,19 @@ before excluding rows, permits different diagnoses across a patient's lesions,
 and rejects conflicting lesion ownership or duplicate-pixel diagnoses. Exact
 within-cohort pixel duplicates contribute one image, selected by image ID.
 
+Manifest schema 1 derives its attrition counts from those final row reasons.
+`counts.input` and `counts.retained` are required nonnegative integers. Input is
+the number of source rows, while retained is the number whose final reason is
+`retained`. The only exclusion keys are `excluded_malignancy`,
+`excluded_modality`, `excluded_indeterminate`, `unknown_diagnosis`,
+`missing_image`, `corrupt_image` and `duplicate_pixels`. A zero-valued exclusion
+key may be omitted, which preserves the existing sparse representation. A
+nonzero category must be present. Every supplied value must match its row tally,
+and retained plus all exclusions must equal input. Each row contributes exactly
+once through its final reason, so the adapter's existing precedence still makes
+a non-dermoscopic malignant row an `excluded_modality` row rather than counting
+it twice.
+
 Audit the full original source export against the complete external download
 using global archive IDs, file hashes, decoded RGB hashes and perceptual-hash
 candidates under rotations/flips. `fingerprint` and `overlap_audit` implement
@@ -60,11 +73,16 @@ calibration/referral summaries, actual software versions and source identity.
 External labels are supplied only to reporting; deep loaders use dummy labels.
 Deep inference caches the deterministic evaluation tensors once for all MC
 passes, with a 512 MiB tensor-size limit. The cache preserves image order and
-transforms; a synthetic check requires exact cached/uncached MC arrays.
+transforms; a synthetic check requires exact cached/uncached MC arrays. Manifest
+count arithmetic is checked before prediction and again before completion.
 
 Use the same release, manifest, audit and output arguments with operation
 `report` after all six runs complete. The report checks each run's identity,
 checksums, raw scores, saved policy and membership before computing metrics.
+It validates the same row-derived attrition arithmetic before reading a saved
+prediction and before writing the report. The report's image, group and class
+counts come from the retained rows, and its `exclusions` object is the validated
+manifest count object.
 Its 2,000 shared unstratified patient-component bootstrap draws (seed 2026)
 preserve mixed-outcome patients and repeated images. It averages metrics and
 paired differences across seeds within each draw, with 95% percentile intervals.

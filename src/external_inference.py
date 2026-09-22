@@ -4,6 +4,7 @@ import importlib.metadata
 import pickle
 import platform
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,8 @@ def validate_audit(path, digest, manifest_sha256):
 
 
 def validate_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("invalid external manifest")
     content = {k: v for k, v in manifest.items() if k != "cohort_sha256"}
     if (
         manifest.get("schema_version") != 1
@@ -45,8 +48,27 @@ def validate_manifest(manifest):
         or manifest.get("cohort_sha256") != splitting.canonical_hash(content)
     ):
         raise ValueError("invalid external manifest")
+    rows = manifest.get("rows")
+    counts = manifest.get("counts")
+    if not isinstance(rows, list):
+        raise ValueError("invalid external manifest rows")
+    if not isinstance(counts, dict):
+        raise ValueError("invalid external manifest counts: expected an object")
+    required = {"input", "retained"}
+    allowed = {"input", *external.EXTERNAL_ROW_REASONS}
+    if not required.issubset(counts) or not set(counts).issubset(allowed):
+        raise ValueError("invalid external manifest counts: missing or unknown key")
+    if any(type(value) is not int or value < 0 for value in counts.values()):
+        raise ValueError(
+            "invalid external manifest counts: values must be nonnegative integers"
+        )
+
     ids = []
-    for row in manifest["rows"]:
+    reasons = Counter()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("reason") not in allowed - {"input"}:
+            raise ValueError("invalid external manifest counts: unknown row reason")
+        reasons[row["reason"]] += 1
         ids.append(splitting._identifier(row["image_id"], "image ID"))
         if not isinstance(row.get("group_id"), str) or not row["group_id"].strip():
             raise ValueError("missing external group identity")
@@ -54,6 +76,21 @@ def validate_manifest(manifest):
             raise ValueError("retained image lacks a hash")
     if not ids or len(set(ids)) != len(ids):
         raise ValueError("empty or duplicated external membership")
+    nonzero_exclusions = {
+        reason for reason in external.EXTERNAL_EXCLUSION_REASONS if reasons[reason] > 0
+    }
+    if not nonzero_exclusions.issubset(counts):
+        raise ValueError("invalid external manifest counts: missing nonzero exclusion")
+    expected = {"input": len(rows), **reasons}
+    if any(counts[key] != expected.get(key, 0) for key in counts):
+        raise ValueError("invalid external manifest counts: values differ from rows")
+    excluded = sum(
+        counts.get(reason, 0) for reason in external.EXTERNAL_EXCLUSION_REASONS
+    )
+    if counts["input"] - counts["retained"] != excluded:
+        raise ValueError(
+            "invalid external manifest counts: attrition does not reconcile"
+        )
     return manifest
 
 
@@ -287,6 +324,8 @@ def evaluate_run(
             (audit_path, audit_sha256),
         ]:
             external_release.check_hash(Path(path), digest)
+        if validate_manifest(run_contract._json(Path(manifest_path))) != manifest:
+            raise ValueError("external manifest changed during inference")
         for row in manifest["rows"]:
             if row["image_sha256"]:
                 external_release.check_hash(
@@ -458,9 +497,10 @@ def write_report(
         external_release.validate_matrix(release["runs"])
         external_release.check_hash(Path(manifest_path), manifest_sha256)
         validate_audit(audit_path, audit_sha256, manifest_sha256)
-        return release
+        manifest = validate_manifest(run_contract._json(Path(manifest_path)))
+        return release, manifest
 
-    release = verify()
+    release, manifest = verify()
     if legacy:
         draws = 2000 if draws is None else draws
     else:
@@ -468,7 +508,6 @@ def write_report(
         if draws is not None and draws != settings["draws"]:
             raise ValueError("report settings differ from the reviewed release")
         draws = settings["draws"]
-    manifest = validate_manifest(run_contract._json(Path(manifest_path)))
     if {p.name for p in runs_dir.iterdir() if p.is_dir()} != set(release["runs"]):
         raise ValueError("missing or extra external run directories")
     models, registry, observed_hashes = {}, {}, {}
@@ -495,6 +534,17 @@ def write_report(
     report = external.paired_report(
         models, draws=draws, metrics_version=1 if legacy else 2
     )
+    retained = [row for row in manifest["rows"] if row["reason"] == "retained"]
+    expected_summary = {
+        "images": len(retained),
+        "groups": len({row["group_id"] for row in retained}),
+        "classes": {
+            str(target): sum(row["target"] == target for row in retained)
+            for target in (0, 1)
+        },
+    }
+    if report.get("counts") != expected_summary:
+        raise ValueError("external report counts differ from retained manifest rows")
     report.update(
         schema_version=2,
         contract="legacy-v1-inspection" if legacy else "strict-v2",

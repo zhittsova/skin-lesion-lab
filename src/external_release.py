@@ -5,9 +5,14 @@ import os
 import pickle
 import platform
 import re
+import tomllib
 from pathlib import Path
 
 import numpy as np
+from packaging.markers import default_environment
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 from src import calibration, run_contract, splitting
 
@@ -16,18 +21,7 @@ FAMILIES = ("logistic", "efficientnet-full-unweighted")
 SEEDS = (17, 42, 73)
 ENVIRONMENT_FILES = ("pyproject.toml", "uv.lock", ".python-version")
 PROTOCOL_FILES = ("docs/evaluation-protocol.md",)
-PACKAGES = (
-    "numpy",
-    "pandas",
-    "scikit-learn",
-    "torch",
-    "torchvision",
-    "pillow",
-    "opencv-python-headless",
-    "matplotlib",
-    "seaborn",
-    "tqdm",
-)
+ENVIRONMENT_SCHEMA_VERSION = 2
 ENVIRONMENT_KEYS = (
     "PYTHONPATH",
     "PYTHONHOME",
@@ -51,16 +45,78 @@ def source_files(root=ROOT):
 IMPORTED_SOURCE = {name: run_contract.sha256(ROOT / name) for name in source_files()}
 
 
+def runtime_software(requirements=None):
+    """Resolve the active installed closure without consulting an index."""
+    if requirements is None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        requirements = project["project"]["dependencies"]
+    software = {}
+    processed_extras = {}
+    marker_environment = default_environment()
+    pending = []
+    for raw in requirements:
+        try:
+            requirement = Requirement(raw)
+            if requirement.marker is None or requirement.marker.evaluate(
+                {**marker_environment, "extra": ""}
+            ):
+                pending.append(raw)
+        except (InvalidRequirement, ValueError) as exc:
+            raise ValueError(f"invalid runtime dependency metadata: {raw}") from exc
+    while pending:
+        raw = pending.pop(0)
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise ValueError(f"invalid runtime dependency metadata: {raw}") from exc
+        name = canonicalize_name(requirement.name)
+        try:
+            distribution = importlib.metadata.distribution(name)
+            version = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError(f"missing runtime dependency metadata: {name}") from exc
+        metadata_name = distribution.metadata.get("Name")
+        if not metadata_name or canonicalize_name(metadata_name) != name:
+            raise ValueError(f"invalid runtime dependency metadata: {name}")
+        try:
+            Version(version)
+        except (InvalidVersion, TypeError) as exc:
+            raise ValueError(f"invalid runtime dependency version: {name}") from exc
+        if requirement.specifier and not requirement.specifier.contains(version):
+            raise ValueError(f"incompatible runtime dependency version: {name}")
+        software[name] = version
+        extras = {"", *requirement.extras}
+        fresh_extras = extras - processed_extras.setdefault(name, set())
+        if not fresh_extras:
+            continue
+        processed_extras[name].update(fresh_extras)
+        for dependency in distribution.requires or ():
+            try:
+                parsed = Requirement(dependency)
+                active = parsed.marker is None or any(
+                    parsed.marker.evaluate({**marker_environment, "extra": extra})
+                    for extra in fresh_extras
+                )
+            except (InvalidRequirement, ValueError) as exc:
+                raise ValueError(
+                    f"invalid runtime dependency metadata: {name}"
+                ) from exc
+            if active:
+                pending.append(dependency)
+    return {name: software[name] for name in sorted(software)}
+
+
 def environment():
     """Execution inputs checked independently of the fitted training environment."""
     import cv2
     import torch
 
     return {
+        "schema_version": ENVIRONMENT_SCHEMA_VERSION,
         "python": platform.python_version(),
         "platform": platform.platform(),
         "machine": platform.machine(),
-        "software": {name: importlib.metadata.version(name) for name in PACKAGES},
+        "software": runtime_software(),
         "variables": {name: os.environ.get(name) for name in ENVIRONMENT_KEYS},
         "torch_threads": torch.get_num_threads(),
         "torch_interop_threads": torch.get_num_interop_threads(),
@@ -215,6 +271,9 @@ def run_facts(root, name, entry, files, *, legacy=False):
             or (not training and entry["device"] != "cpu")
         ):
             raise ValueError("invalid estimator/policy/preprocessing/device reference")
+        # A freshly hashed release must still contain a complete, consistent fit.
+        # Keep this after path/ledger/identity checks and before any estimator loads.
+        run_contract.validate_run(run_dir)
     return record, facts
 
 
@@ -335,7 +394,33 @@ def validate_release(release, root):
         check_hash(ROOT / name, files[name])
         if name in IMPORTED_SOURCE and files[name] != IMPORTED_SOURCE[name]:
             raise ValueError("execution source changed since import")
-    if run_contract._json(root / env_path) != environment():
+    recorded_environment = run_contract._json(root / env_path)
+    if (
+        not isinstance(recorded_environment, dict)
+        or type(recorded_environment.get("schema_version")) is not int
+        or recorded_environment["schema_version"] != ENVIRONMENT_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported execution environment schema")
+    current_environment = environment()
+    recorded_software = recorded_environment.get("software")
+    if not isinstance(recorded_software, dict):
+        raise ValueError("invalid execution environment software inventory")
+    missing_packages = set(current_environment["software"]) - set(recorded_software)
+    if missing_packages:
+        raise ValueError(
+            "execution environment omits runtime dependencies: "
+            + ", ".join(sorted(missing_packages))
+        )
+    extra_packages = set(recorded_software) - set(current_environment["software"])
+    if extra_packages:
+        raise ValueError(
+            "execution environment has unexpected dependencies: "
+            + ", ".join(sorted(extra_packages))
+        )
+    for name, version in current_environment["software"].items():
+        if recorded_software[name] != version:
+            raise ValueError(f"execution environment version mismatch: {name}")
+    if recorded_environment != current_environment:
         raise ValueError("execution environment mismatch")
     if release.get("comparison") != {"families": list(FAMILIES), "seeds": list(SEEDS)}:
         raise ValueError("unsupported external comparison protocol")

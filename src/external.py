@@ -18,6 +18,17 @@ from src import (
     splitting,
 )
 
+EXTERNAL_EXCLUSION_REASONS = (
+    "excluded_malignancy",
+    "excluded_modality",
+    "excluded_indeterminate",
+    "unknown_diagnosis",
+    "missing_image",
+    "corrupt_image",
+    "duplicate_pixels",
+)
+EXTERNAL_ROW_REASONS = ("retained", *EXTERNAL_EXCLUSION_REASONS)
+
 
 def fingerprint(path, image_id):
     """Hash original bytes and RGB pixels, with rotation/flip pHash candidates."""
