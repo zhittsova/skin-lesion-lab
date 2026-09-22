@@ -566,6 +566,7 @@ development: {ece_development:.4f}""")
             "MAP threshold": metrics_development_map,
         },
         save_path=str(RESULTS_PATH / "figures" / "threshold_comparison.png"),
+        title="Threshold comparison on development cohort",
     )
 
     mean_probs, freqs, bin_sizes = evaluation.compute_calibration_curve(

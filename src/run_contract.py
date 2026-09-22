@@ -142,12 +142,15 @@ def _check_id(run_id: str) -> str:
 
 def _failure_reason(error: BaseException) -> str:
     message = str(error).lower()
+    if isinstance(error, KeyboardInterrupt):
+        return "interrupted"
     if isinstance(error, FileNotFoundError):
         return "missing_file"
     for prefix, code in (
         ("input changed", "input_changed"),
         ("source changed", "source_changed"),
         ("run manifest changed", "manifest_changed"),
+        ("conflicting lesion diagnoses", "invalid_cohort"),
         ("invalid split manifest", "invalid_manifest"),
         ("prediction", "invalid_predictions"),
         ("artifact", "invalid_artifact"),

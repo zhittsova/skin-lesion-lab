@@ -353,7 +353,7 @@ def plot_metric_comparison(
 def plot_threshold_comparison(
     metrics_by_point: Mapping[str, Mapping[str, float | int]],
     save_path: str | None = None,
-    title: str = "Threshold Comparison on Test Set",
+    title: str = "Threshold comparison on development cohort",
 ) -> plt.Figure:
     """Compare MAP and cost-sensitive threshold operating points."""
     metric_names = ["recall", "specificity", "precision", "f1", "average_cost"]
@@ -394,7 +394,7 @@ def plot_threshold_comparison(
     ax.set_xticks(x)
     ax.set_xticklabels(["Recall", "Specificity", "Precision", "F1", "Avg. cost"])
     ax.legend()
-    ax.set_ylim([0, min(1.5, max(1.0, max_value) * 1.18)])
+    ax.set_ylim([0, max(1.0, max_value) * 1.18])
     ax.grid(True, alpha=0.3, axis="y")
 
     if save_path:
