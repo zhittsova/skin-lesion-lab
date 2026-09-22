@@ -215,6 +215,9 @@ def run_facts(root, name, entry, files, *, legacy=False):
             or (not training and entry["device"] != "cpu")
         ):
             raise ValueError("invalid estimator/policy/preprocessing/device reference")
+        # A freshly hashed release must still contain a complete, consistent fit.
+        # Keep this after path/ledger/identity checks and before any estimator loads.
+        run_contract.validate_run(run_dir)
     return record, facts
 
 

@@ -472,7 +472,7 @@ class ExternalReleaseTests(unittest.TestCase):
             write(path, value)
             with self.subTest(key=key), self.assertRaises(ValueError):
                 external_inference.write_report(
-                    **common, output_path=self.root / "bad-report.json", draws=2
+                    **common, output_path=self.root / "bad-report.json", draws=5
                 )
             self.assertFalse((self.root / "bad-report.json").exists())
             path.write_bytes(original)
@@ -500,7 +500,7 @@ class ExternalReleaseTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             external_inference.write_report(
-                **common, output_path=self.root / "bad-report.json", draws=2
+                **common, output_path=self.root / "bad-report.json", draws=5
             )
         self.assertFalse((self.root / "bad-report.json").exists())
 

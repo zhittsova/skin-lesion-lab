@@ -26,7 +26,19 @@ and `estimator`, `policy`, `preprocessing` and `device`. Identity fields include
 run ID, pipeline, seed, architecture, pretrained initialization, training mode, loss strategy, positive loss
 weight, policy version and configuration digest. The validator derives those
 facts from the fitted record and deep training metadata before comparing them
-with the release. It then checks the trusted serialized estimator or checkpoint.
+with the release. Every fitted run must also pass
+[`run_contract.validate_run`](run-contract.md) before any trusted estimator or
+checkpoint is deserialized. That shared validator binds producer and shared
+predictions, array schemas and MC contents, calibration provenance and saved
+decisions, split/source artifacts, and pipeline metadata. The run ledger must
+match the files on disk and the release must include every ledger entry.
+
+For example, removing a calibration producer CSV from disk and both ledgers
+while leaving its record reference is invalid even if every remaining hash is
+correct. Existing but unregistered files, missing producer keys and disagreement
+between producer and shared predictions also reject. Hashes bind the listed
+bytes; the fitted-run contract establishes their completeness and consistency.
+The release validator then checks the trusted serialized estimator or checkpoint.
 
 For classical fits, `preprocessing` is
 `{"kind": "embedded", "artifact": "<run-path>/<estimator-path>"}`. The fitted
@@ -44,19 +56,24 @@ seed, image size, dropout, batch size and MC pass count. It reconstructs weights
 without downloading pretrained weights and forces the deterministic evaluation
 behavior defined by the pinned source. Device is declared per run.
 
-Validate fitted runs with `run_contract.validate_run` before assembling a new
-release. Capture the source and runtime inventory, copy the reviewed protocol,
+Use `run_contract.validate_run` to diagnose fitted runs before assembling a new
+release. Strict acceptance repeats that validation automatically. Capture the
+source and runtime inventory, copy the reviewed protocol,
 construct each run entry from fitted facts, and hash every required file. Inspect
 the result with `external.verify_files(release_path, digest, root)` before
 external execution. The generated fixture in
 [`tests/external_fixtures.py`](../tests/external_fixtures.py) provides a complete
 small example, including artifacts that can actually be loaded. Its synthetic
 weights and outcomes have no model-quality interpretation.
+[`tests/test_release_run_contract.py`](../tests/test_release_run_contract.py)
+also fits tiny generated logistic and small-CNN runs through the real training
+CLIs and requires both ordinary run validation and strict release acceptance.
 
 ## Execution and reporting
 
 `evaluate_external.py run` accepts only v2. Gates run before prediction and again
-before completion. They check fitted partitions against external image IDs,
+before completion. Both gates enforce the full fitted-run contract. They check
+fitted partitions against external image IDs,
 release files, manifest, overlap audit and image bytes. Failed execution retains
 a failed record. Existing output directories are never reused.
 
@@ -64,9 +81,10 @@ The report boundary requires exactly the two families and three seeds above,
 with no extra run directories. It verifies each saved result's release, audit,
 manifest, fitted identity, execution source and environment, then reconstructs
 its predictions and policy report from saved scores. It checks inputs and result
-files again before writing the report. CSV reads preserve lexical image, group
-and run IDs, including leading zeros and NA-like strings. Image IDs still follow
-the source identifier rules.
+files and the full fitted-run contract again before writing the report. A
+contract failure prevents an accepted report from being written. CSV reads
+preserve lexical image, group and run IDs, including leading zeros and NA-like
+strings. Image IDs still follow the source identifier rules.
 
 New run records and report envelopes declare schema 2 and metric version 2.
 Prediction tables retain schema 1 for policy v1; policy v2 tables declare schema 2
@@ -76,6 +94,11 @@ posterior log odds and saves a separate ranking score, as specified in
 scored, but they do not replace either family in the primary report matrix.
 
 ## Historical inspection
+
+Full fitted-run validation enforces the existing run schema 1 within release
+schema 2. It adds no serialized fields or policy semantics, so neither schema
+version changes. Incomplete schema-2 releases reject even if an earlier validator
+accepted them. They cannot fall back to historical inspection.
 
 The original S11 release is v1. Use `inspect_legacy_release` with an explicit
 historical source snapshot and the original protocol to verify its listed bytes
