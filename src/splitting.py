@@ -76,7 +76,7 @@ def _records(frame):
     return sorted(rows, key=lambda r: r["image_id"])
 
 
-def _components(rows):
+def _components(rows, known_links=None, *, require_consistent_labels=True):
     parents = list(range(len(rows)))
 
     def root(i):
@@ -87,8 +87,18 @@ def _components(rows):
 
     seen = {}
     for i, row in enumerate(rows):
-        for key in ("lesion_id", "patient_id", "duplicate_cluster_id", "image_sha256"):
-            value = row[key]
+        for key in (
+            "lesion_id",
+            "patient_id",
+            "duplicate_cluster_id",
+            "image_sha256",
+            "source_component",
+        ):
+            value = (
+                known_links[row["image_id"]]
+                if key == "source_component" and known_links
+                else row.get(key, "")
+            )
             if not value:
                 continue
             token = (key, value)
@@ -101,7 +111,7 @@ def _components(rows):
         groups.setdefault(root(i), []).append(row)
     result = []
     for members in groups.values():
-        if len({row["target"] for row in members}) != 1:
+        if require_consistent_labels and len({row["target"] for row in members}) != 1:
             raise ValueError(
                 "mixed labels in linked group; mixed-outcome patients are unsupported"
             )
@@ -153,10 +163,18 @@ def create_manifest(frame, *, fractions=FRACTIONS, seed=42):
     if frame.attrs.get("label_policy_version") != LABEL_POLICY_VERSION:
         raise ValueError("unsupported label policy")
     metadata = _sha(frame.attrs.get("metadata_content_hash"))
-    groups = _components(rows)
+    known_links = frame.attrs.get("identity_components")
+    if known_links is not None:
+        if set(known_links) != {row["image_id"] for row in rows}:
+            raise ValueError("identity component membership differs from cohort")
+        for value in known_links.values():
+            _identifier(value, "identity component")
+    direct_groups = _components(rows)
+    groups = _components(rows, known_links)
+    bridged = groups != direct_groups
     parts = _allocate(groups, fractions, seed, ROLES)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2 if bridged else 1,
         "protocol_version": PROTOCOL_VERSION,
         "purpose": "development",
         "source": source,
@@ -185,6 +203,8 @@ def create_manifest(frame, *, fractions=FRACTIONS, seed=42):
         "rows": rows,
         "partitions": parts,
     }
+    if bridged:
+        payload["identity_components"] = dict(sorted(known_links.items()))
     payload["split_hash"] = canonical_hash(payload)
     return payload
 

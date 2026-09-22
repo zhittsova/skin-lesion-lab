@@ -36,10 +36,25 @@ PREDICTION_COLUMNS = (
     "prob_melanoma",
     "prediction",
 )
+IDENTITY_COLUMNS = (
+    "run_id",
+    "model_key",
+    "role",
+    "split_hash",
+    "image_id",
+    "lesion_id",
+    "group_id",
+)
 
 
-def _read_csv(path):
-    return pd.read_csv(path, float_precision="round_trip")
+def _read_csv(path: Path) -> pd.DataFrame:
+    """Read prediction numbers accurately while keeping IDs lexical."""
+    return pd.read_csv(
+        path,
+        dtype={name: str for name in IDENTITY_COLUMNS},
+        keep_default_na=False,
+        float_precision="round_trip",
+    )
 
 
 def sha256(path: Path) -> str:
@@ -509,6 +524,7 @@ def validate_run(run_dir: Path, *, input_paths: dict[str, Path] | None = None):
         raise ValueError("run ID/path mismatch")
     if splitting.canonical_hash(record["config"]) != record["config_sha256"]:
         raise ValueError("config hash mismatch")
+    _metrics_version(record)
     expected_files = set(record["artifacts"])
     actual_files = {
         str(file.relative_to(path))
@@ -603,13 +619,14 @@ def validate_run(run_dir: Path, *, input_paths: dict[str, Path] | None = None):
 
 def recompute_metrics(run_dir: Path):
     """Recompute binary scores from checked prediction records only."""
-    _, predictions = validate_run(run_dir)
+    record, predictions = validate_run(run_dir)
     metrics = {}
     for role, frame in predictions.groupby("role", sort=True):
         metrics[role] = evaluation.compute_classification_metrics(
             frame.target.to_numpy(),
             frame.prediction.to_numpy(),
             frame.prob_melanoma.to_numpy(),
+            metrics_version=_metrics_version(record),
         )
     return metrics
 
@@ -632,6 +649,7 @@ def recompute_report(run_dir: Path):
     else:
         return {"metrics": recompute_metrics(run_dir)}
     summary = _json(summary_path)
+    metrics_version = _metrics_version(record, summary)
     cost_fn = float(summary["cost_matrix"]["false_negative"])
     cost_fp = float(summary["cost_matrix"]["false_positive"])
     if points is None:
@@ -654,7 +672,7 @@ def recompute_report(run_dir: Path):
         for name, predict in points.items():
             labels = predict(probabilities, frame)
             scores = evaluation.compute_classification_metrics(
-                y_true, labels, probabilities
+                y_true, labels, probabilities, metrics_version=metrics_version
             )
             scores = evaluation.add_average_cost(scores, len(frame), cost_fn, cost_fp)
             if record["pipeline"].startswith("deep_"):
@@ -666,7 +684,11 @@ def recompute_report(run_dir: Path):
                 scores["threshold"] = float(summary["cost_matrix"][threshold_name])
             metrics[role][name] = scores
         ece[role] = evaluation.compute_calibration_error(y_true, probabilities)
-    result = {"metrics": metrics, "expected_calibration_error": ece}
+    result = {
+        "metrics_version": metrics_version,
+        "metrics": metrics,
+        "expected_calibration_error": ece,
+    }
     if (Path(run_dir) / "models" / "decision_policy.json").exists():
         result["calibration_report"] = recompute_calibration_report(run_dir)
     if record["pipeline"].startswith("deep_"):
@@ -700,7 +722,14 @@ def _policy_inputs(path, record, role):
         )
         variances = scores.var(axis=0, ddof=1)
     else:
-        scores = producer.raw_score.to_numpy(dtype=float)
+        column = (
+            "calibration_score"
+            if record["config"].get("decision_policy_version") == 2
+            else "raw_score"
+        )
+        if column not in producer:
+            raise ValueError("missing decision policy input score")
+        scores = producer[column].to_numpy(dtype=float)
         variances = None
     return producer, scores, variances
 
@@ -710,6 +739,14 @@ def _check_decision_policy(path, record, manifest, predictions):
     if not file.exists() and record["config"].get("decision_policy_version") is None:
         return  # Earlier version-1 runs remain readable.
     policy = _json(file)
+    version = policy.get("schema_version")
+    if (
+        type(version) is not int
+        or version not in (1, 2)
+        or version != record["config"].get("decision_policy_version", 1)
+        or (version == 2 and record["pipeline"] != "classical_gmm")
+    ):
+        raise ValueError("unsupported or mismatched decision policy version")
     if (
         policy["fit"]["role"] != "calibration"
         or policy["fit"]["image_ids"] != manifest["partitions"]["calibration"]
@@ -739,7 +776,11 @@ def _check_decision_policy(path, record, manifest, predictions):
     else:
         summary_path = path / "results" / "metrics_summary.json"
         threshold_key = "cost_threshold"
-    matrix = _json(summary_path)["cost_matrix"]
+    summary = _json(summary_path)
+    _metrics_version(record, summary)
+    if summary.get("decision_policy_version", 1) != version:
+        raise ValueError("decision policy version differs from summary")
+    matrix = summary["cost_matrix"]
     decision = policy["decision"]
     if (
         matrix[threshold_key] != decision["threshold"]
@@ -755,6 +796,15 @@ def _check_decision_policy(path, record, manifest, predictions):
     for role in record["prediction_files"]:
         producer, scores, variances = _policy_inputs(path, record, role)
         applied = calibration.apply_policy(policy, scores, variances=variances)
+        if version == 2:
+            for column, expected in (
+                ("raw_score", calibration.expit(scores)),
+                ("ranking_score", applied["ranking_score"]),
+            ):
+                if column not in producer or not np.array_equal(
+                    producer[column].to_numpy(dtype=float), expected
+                ):
+                    raise ValueError("decision policy log score or ranking mismatch")
         for column, expected in (
             ("prob_melanoma", applied["calibrated_probability"]),
             ("corrected_score", applied["corrected_score"]),
@@ -774,7 +824,7 @@ def _check_decision_policy(path, record, manifest, predictions):
         if role == "calibration":
             digest = calibration.fit_data_digest(
                 producer.target.to_numpy(),
-                applied["corrected_score"],
+                scores if version == 2 else applied["corrected_score"],
                 producer.image_id.tolist(),
             )
             expected_threshold, _ = calibration.select_cost_threshold(
@@ -783,6 +833,12 @@ def _check_decision_policy(path, record, manifest, predictions):
                 decision["cost_fn"],
                 decision["cost_fp"],
             )
+            if version == 2 and policy["score_transform"]["scale"] != max(
+                1.0, float(np.abs(scores).max())
+            ):
+                raise ValueError(
+                    "decision policy scale differs from calibration scores"
+                )
             if digest != policy["fit"]["data_sha256"]:
                 raise ValueError("decision policy calibration fit data digest mismatch")
             if expected_threshold != decision["threshold"]:
@@ -817,6 +873,19 @@ def recompute_calibration_report(run_dir):
     for role in ("calibration", "development"):
         producer, scores, variances = _policy_inputs(path, record, role)
         result[role] = calibration.policy_report(
-            policy, producer.target.to_numpy(), scores, variances=variances
+            policy,
+            producer.target.to_numpy(),
+            scores,
+            variances=variances,
+            metrics_version=_metrics_version(record),
         )
     return result
+
+
+def _metrics_version(record, summary=None):
+    version = record["config"].get("metrics_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported metrics version")
+    if summary is not None and summary.get("metrics_version", 1) != version:
+        raise ValueError("summary metrics version differs from run")
+    return version

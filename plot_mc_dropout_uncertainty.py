@@ -6,6 +6,8 @@ Use with real MC Dropout outputs when available:
 
 Expected `.npy` shape is `(n_passes, n_samples)`, where each row is one
 dropout-active inference pass and each value is `P(melanoma)`.
+CSV uses the same orientation. Its required header is `sample_0,sample_1,...`
+in column order, with one stochastic pass per following row and no index column.
 
 If no MC output is supplied, the script creates a clearly marked illustrative
 figure for slides. It is not an experimental result.
@@ -14,6 +16,7 @@ figure for slides. It is not an experimental result.
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -45,7 +48,10 @@ def parse_args() -> argparse.Namespace:
         "--mc-probs",
         type=Path,
         default=None,
-        help="Optional .npy or .csv with MC probabilities. Shape: n_passes x n_samples.",
+        help=(
+            "Optional .npy or .csv with n_passes rows and n_samples columns. "
+            "CSV requires sample_0,sample_1,... headers and no index column."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -62,12 +68,32 @@ def parse_args() -> argparse.Namespace:
 
 def load_mc_probabilities(path: Path) -> np.ndarray:
     if path.suffix == ".npy":
-        return np.load(path)
-    if path.suffix == ".csv":
-        frame = pd.read_csv(path)
-        numeric = frame.select_dtypes(include=["number"])
-        return numeric.to_numpy().T
-    raise ValueError("Use a .npy or .csv file for MC probabilities")
+        raw = np.load(path, allow_pickle=False)
+    elif path.suffix == ".csv":
+        with path.open(newline="") as file:
+            reader = csv.reader(file, strict=True)
+            header = next(reader, [])
+            if not header or header != [f"sample_{i}" for i in range(len(header))]:
+                raise ValueError("CSV header must be sample_0,sample_1,... without IDs")
+            rows = []
+            for row in reader:
+                if len(row) != len(header) or any(value.strip() == "" for value in row):
+                    raise ValueError("CSV has an empty or ragged MC pass")
+                try:
+                    rows.append([float(value) for value in row])
+                except ValueError as error:
+                    raise ValueError("CSV probabilities must be numeric") from error
+        raw = np.asarray(rows, dtype=float)
+    else:
+        raise ValueError("Use a .npy or .csv file for MC probabilities")
+    try:
+        values = np.asarray(raw, dtype=float)
+        summarize_mc_dropout_probabilities(values)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MC probabilities need at least two finite passes in [0, 1]"
+        ) from error
+    return values
 
 
 def make_illustrative_mc_probabilities(seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
