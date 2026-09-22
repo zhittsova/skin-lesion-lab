@@ -18,6 +18,12 @@ from src import calibration, data, gmm, run_contract, splitting
 
 class SharedManifestSmokeTests(unittest.TestCase):
     def test_both_pipelines_and_summary_preserve_the_same_development_ids(self):
+        self._flow(1)
+
+    def test_v2_gmm_and_summary_preserve_finite_scores(self):
+        self._flow(2)
+
+    def _flow(self, policy_version):
         import summarize_results
         import train_deep_pipeline
         import train_pipeline
@@ -91,6 +97,8 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         str(classical_root),
                         "--run-id",
                         "classical-fixture",
+                        "--decision-policy-version",
+                        str(policy_version),
                     ],
                 ),
                 patch.object(train_pipeline, "plots", Mock()),
@@ -167,7 +175,12 @@ class SharedManifestSmokeTests(unittest.TestCase):
                 )
                 self.assertEqual(policy["fit"]["split_hash"], manifest["split_hash"])
                 if location == classical:
-                    scores = predictions.raw_score.to_numpy()
+                    scores = predictions[
+                        "calibration_score" if policy_version == 2 else "raw_score"
+                    ].to_numpy()
+                    self.assertEqual(policy["schema_version"], policy_version)
+                    if policy_version == 2:
+                        self.assertIn("ranking_score", predictions)
                     variances = None
                 else:
                     scores = np.load(
@@ -266,6 +279,28 @@ class SharedManifestSmokeTests(unittest.TestCase):
                         self.assertAlmostEqual(
                             value, reported["mc_dropout_uncertainty"][metric]
                         )
+            if policy_version == 2:
+                producer_path = classical / "results/tables/predictions_development.csv"
+                record_path = classical / "run.json"
+                original_producer = producer_path.read_bytes()
+                original_record = record_path.read_bytes()
+                for column in ("calibration_score", "ranking_score"):
+                    altered = run_contract._read_csv(producer_path)
+                    altered.loc[0, column] += 1
+                    altered.to_csv(producer_path, index=False)
+                    record = json.loads(original_record)
+                    record["artifacts"][
+                        "results/tables/predictions_development.csv"
+                    ] = run_contract.sha256(producer_path)
+                    record_path.write_text(json.dumps(record))
+                    with (
+                        self.subTest(column=column),
+                        self.assertRaisesRegex(ValueError, "decision policy"),
+                    ):
+                        run_contract.validate_run(classical)
+                    producer_path.write_bytes(original_producer)
+                    record_path.write_bytes(original_record)
+
             for location in (classical, deep_results):
                 policy_file = location / "models" / "decision_policy.json"
                 record_file = location / "run.json"
